@@ -361,17 +361,13 @@ struct HomeView: View {
         // 才做得出下沉回弹。外层有拖动手势，但手指一移动 Button 就让位，不会抢滑动。
         // 封面上不再画播放按钮 —— 底部播放条已经有一个，两张同时出现太吵。
         //
-        // 点非正中的卡 = 翻到那张（不播放）。上下露出的封面一直是「死」的，
-        // 想精确翻页只能拖；现在直接点它就跳过去，连续点上方两下就是翻两张。
+        // 只有正中那张可以按 —— 上下露出的封面一律不可点。
+        // 之前试过「点旁边翻页」，结果想拖牌堆时手一抖就成了误触，得不偿失。
         return Button {
-            if isCenter {
-                if isCurrent {
-                    player.togglePlayPause()
-                } else {
-                    player.play(track: track, in: tracks, source: source.queueSource)
-                }
+            if isCurrent {
+                player.togglePlayPause()
             } else {
-                slide(to: i)
+                player.play(track: track, in: tracks, source: source.queueSource)
             }
         } label: {
             Group {
@@ -407,10 +403,9 @@ struct HomeView: View {
         )
         .opacity(fade(d))
         .shadow(color: .black.opacity(shadowAlpha(d)), radius: 18, y: 10)
-        // 牌堆里渲染到的卡都能点：点到的总是 zIndex 最高的那张，
-        // 也就是视觉上「最上面露出」的封面。远处淡出的卡点不到也没关系。
-        .allowsHitTesting(abs(d) <= 4.5)
-        .accessibilityLabel(isCenter ? "播放 \(track.name)" : "翻到 \(track.name)")
+        // 只有正中那张接收点击，旁边的封面纯展示 —— 想翻页只能拖，杜绝误触。
+        .allowsHitTesting(isCenter)
+        .accessibilityLabel(isCenter ? "播放 \(track.name)" : track.name)
     }
 
     private func scale(_ d: CGFloat) -> CGFloat {
@@ -567,18 +562,6 @@ struct HomeView: View {
 
     // MARK: - 手势
 
-    /// 翻到第 i 张（只翻页，不播放）。点上下露出的封面走这里。
-    private func slide(to target: Int) {
-        let clamped = min(max(target, 0), tracks.count - 1)
-        guard clamped != index else { return }
-        tickSlot = nil
-        liveSlot = clamped
-        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
-            index = clamped
-            drag = 0
-        }
-    }
-
     private func deckDrag(_ m: DeckMetrics) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
@@ -610,14 +593,15 @@ struct HomeView: View {
             .onEnded { value in
                 guard !tracks.isEmpty else { return }
 
-                // 只信实际位移：之前用 predictedEndTranslation（预测松手后的位置），
-                // 轻扫一下预测就能冲出去两三张，停点全靠运气 —— 这就是「太灵敏」。
-                // 现在普通模式下没滑过半张就回弹，速度只借最多 1 张的惯性。
-                var step = Int((-(value.translation.height * (fastScroll ? 1.9 : 1.0)) / m.step).rounded())
-                if !fastScroll, step == 0 {
-                    let v = value.velocity.height
-                    if v < -1500 { step = 1 }       // 向上快扫 → 下一张
-                    else if v > 1500 { step = -1 }
+                // 回到预测位移：松手那一刻系统会预测手指的落点，轻扫也能稳稳翻一张，
+                // 比只看实际位移顺手。灵敏度靠两层压住 ——
+                // 普通模式一次最多 2 张；慢拖必须真的越过半张才算数（预测值小，取整后是 0）。
+                let raw = -(value.predictedEndTranslation.height * (fastScroll ? 1.9 : 1.0)) / m.step
+                var step = Int(raw.rounded())
+                if !fastScroll, abs(step) < 1 {
+                    // 慢拖没过半张，但手上有明显的快扫速度 → 认 1 张。
+                    if value.velocity.height < -1300 { step = 1 }
+                    else if value.velocity.height > 1300 { step = -1 }
                 }
                 let limit = fastScroll ? 8 : 2
                 step = min(max(step, -limit), limit)

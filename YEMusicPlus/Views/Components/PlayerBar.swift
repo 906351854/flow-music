@@ -30,66 +30,73 @@ struct PlayerBar: View {
 
             Spacer(minLength: 4)
 
-            if player.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(Theme.accent)
-                    .frame(width: 36, height: 36)
-            } else {
+            // 控制区三键等距排列：两侧按键同宽（30），播放键（36）居中，
+            // 播放键的圆心正好落在上一曲和下一曲的连线中点上。
+            HStack(spacing: 7) {
+                // 上一曲沿用系统语义：播过 3 秒先回到开头。
                 Button {
-                    player.togglePlayPause()
+                    player.previous()
                 } label: {
-                    // 进度不再画在底部当一条细线，改成绕着播放键的一圈：
-                    // 底圈常驻（不然没播的时候按钮会飘着没轮廓），
-                    // 进度弧从 12 点顺时针长出去，和 App Store 的下载圈一个路子。
-                    ZStack {
-                        Circle()
-                            .stroke(.white.opacity(0.16), lineWidth: 2)
+                    Image(systemName: "backward.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .frame(width: 30, height: 32)
+                        .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
 
-                        Circle()
-                            .trim(from: 0, to: player.progress)
-                            .stroke(
-                                Theme.accent,
-                                style: StrokeStyle(lineWidth: 2, lineCap: .round)
-                            )
-                            .rotationEffect(.degrees(-90))
-                            // 播放器每 0.4s 报一次时间，这里用同样时长线性补间，
-                            // 弧才是匀速爬，而不是一格一格跳。
-                            .animation(.linear(duration: 0.4), value: player.progress)
+                Group {
+                    if player.isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(Theme.accent)
+                            .frame(width: 30, height: 30)
+                            .padding(3)
+                    } else {
+                        Button {
+                            player.togglePlayPause()
+                        } label: {
+                            // 进度不再画在底部当一条细线，改成绕着播放键的一圈：
+                            // 底圈常驻（不然没播的时候按钮会飘着没轮廓），
+                            // 进度弧从 12 点顺时针长出去，和 App Store 的下载圈一个路子。
+                            ZStack {
+                                Circle()
+                                    .stroke(.white.opacity(0.16), lineWidth: 2)
 
-                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white)
+                                Circle()
+                                    .trim(from: 0, to: player.progress)
+                                    .stroke(
+                                        Theme.accent,
+                                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                                    )
+                                    .rotationEffect(.degrees(-90))
+                                    // 播放器每 0.4s 报一次时间，这里用同样时长线性补间，
+                                    // 弧才是匀速爬，而不是一格一格跳。
+                                    .animation(.linear(duration: 0.4), value: player.progress)
+
+                                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
+                            .frame(width: 30, height: 30)
+                            .padding(3)
+                            .contentShape(.circle)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .frame(width: 30, height: 30)
-                    .padding(3)
-                    .contentShape(.circle)
+                }
+
+                Button {
+                    player.next()
+                } label: {
+                    Image(systemName: "forward.fill")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.82))
+                        .frame(width: 30, height: 32)
+                        .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
             }
-
-            // 上一曲 / 下一曲对称摆放。上一曲沿用系统语义：播过 3 秒先回到开头。
-            Button {
-                player.previous()
-            } label: {
-                Image(systemName: "backward.fill")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .frame(width: 30, height: 32)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
-
-            Button {
-                player.next()
-            } label: {
-                Image(systemName: "forward.fill")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .frame(width: 30, height: 32)
-                    .contentShape(.rect)
-            }
-            .buttonStyle(.plain)
         }
         // 嵌入标签栏时系统容器只留了很窄的边，自己再补一段，封面才不会贴着屏幕边。
         .padding(.leading, embedded ? 16 : 10)
