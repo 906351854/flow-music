@@ -327,10 +327,12 @@ struct HomeView: View {
                         // 歌词模式：正中那张挪到屏幕左侧并向内倾一点，
                         // 原位让给模糊面板 + 歌词。weight 只对正中附近生效，
                         // 翻到别的卡时归零，牌堆恢复原状。
-                        .offset(x: -m.width * 0.24 * lyricsWeight(d))
-                        .scaleEffect(1 - 0.16 * lyricsWeight(d))
+                        .offset(x: -m.width * 0.28 * lyricsWeight(d))
+                        .scaleEffect(1 - 0.22 * lyricsWeight(d))
+                        // 正角绕 Y 轴：右边往里转（朝歌词面板的方向退进屏幕），
+                        // 像一扇朝里开的门。之前是负角，右边翻向外了，方向反。
                         .rotation3DEffect(
-                            .degrees(-13 * Double(lyricsWeight(d))),
+                            .degrees(45 * Double(lyricsWeight(d))),
                             axis: (x: 0, y: 1, z: 0),
                             anchor: .center,
                             perspective: 0.6
@@ -606,11 +608,14 @@ struct HomeView: View {
         ) { time in
             player.seek(to: time)
         }
-        .frame(width: m.width * 0.54,
-               height: min(m.side * 1.04, m.height * 0.52))
+        .frame(width: m.width * 0.62,
+               height: min(m.side * 1.35, m.height * 0.62))
         .background {
             Rectangle()
                 .fill(.ultraThinMaterial)
+                // 材质已经是最低档（ultraThin），再压到一成 ——
+                // 要的是几乎察觉不到的一层雾，不是一块深色玻璃。
+                .opacity(0.10)
         }
         .mask {
             LinearGradient(
@@ -639,7 +644,7 @@ struct HomeView: View {
         // ZStack 居中，整体右移到封面原位。注意纵向也要跟着挪：
         // 牌堆的封面中心在 40% 屏高处（centerY），而 ZStack 的中线在 50% ——
         // 不补这段差，面板会比封面低一截，两边的羽化对不上。
-        .offset(x: m.width * 0.21, y: m.centerY - m.height / 2)
+        .offset(x: m.width * 0.12, y: m.centerY - m.height / 2)
         .gesture(lyricsPanelDrag)
     }
 
@@ -647,8 +652,11 @@ struct HomeView: View {
 
     /// 把牌堆翻到正中那张的上/下一张（`delta` 为 -1 / +1），只挪位置、不播放。
     /// 点上下空白处走这里 —— 定位用，按了正中封面才开始播。
+    ///
+    /// 歌词展开时禁用：牌堆整个冻结，上下点按不做任何事，
+    /// 先把面板收回来才能翻歌。不然翻着牌歌词还是旧的，两边各走各的。
     private func slide(_ delta: Int) {
-        guard !tracks.isEmpty else { return }
+        guard !tracks.isEmpty, !lyricsOpen else { return }
         let target = min(max(index + delta, 0), tracks.count - 1)
         guard target != index else { return }
         tickSlot = nil
@@ -668,12 +676,13 @@ struct HomeView: View {
 
                 // 轴向判定：这一笔先动过 8pt 时定死横/竖，此后不再换向 ——
                 // 斜着拖不会出现牌堆和歌词面板来回抢。
+                // 歌词展开期间不认竖向：牌堆整个冻结，想翻歌先收回面板。
                 if dragAxis == nil {
                     if abs(w) > 8, abs(w) > abs(h) * 1.15 {
                         dragAxis = .horizontal
                         axisStartProgress = lyricsOpen ? 1 : 0
                         DeckHaptics.prepare()
-                    } else if abs(h) > 10 {
+                    } else if abs(h) > 10, !lyricsOpen {
                         dragAxis = .vertical
                     }
                 }
