@@ -226,15 +226,13 @@ struct HomeView: View {
             GeometryReader { geo in
                 let metrics = DeckMetrics(size: geo.size)
                 deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
-                // 点正中封面以上的空白 = 上一曲，以下 = 下一曲。
-                // 正中封面自己是 Button，会先吃掉点击，不会漏到这里。
+                // 点正中封面以上的空白 = 上一张（并播放），以下 = 下一张。
+                //
+                // 不直接调 player.previous()/next()：previous 有「播过 3 秒先回到开头」
+                // 的系统语义，歌放着的时候点上方永远只是重播；next 走的是播放器队列，
+                // 和牌堆对不上时会出现封面和歌各走各的。以牌堆当前位置为基准最直观。
                     .onTapGesture(count: 1, coordinateSpace: .local) { loc in
-                        guard !tracks.isEmpty else { return }
-                        if loc.y < metrics.centerY {
-                            player.previous()
-                        } else {
-                            player.next()
-                        }
+                        playAdjacent(loc.y < metrics.centerY ? -1 : 1)
                     }
             }
             .ignoresSafeArea()
@@ -313,9 +311,11 @@ struct HomeView: View {
             stops: [
                 .init(color: .black, location: 0),
                 .init(color: .black, location: at(0.58)),
-                .init(color: .black.opacity(0.62), location: at(0.82)),
-                .init(color: .black.opacity(0.18), location: at(0.98)),
-                .init(color: .clear, location: at(1.10)),
+                // 底部渐隐收着点：之前 0.62/0.18 淡得太狠，第二张就快看不见了。
+                .init(color: .black.opacity(0.78), location: at(0.82)),
+                .init(color: .black.opacity(0.46), location: at(1.00)),
+                .init(color: .black.opacity(0.10), location: at(1.14)),
+                .init(color: .clear, location: at(1.24)),
             ],
             startPoint: .top,
             endPoint: .bottom
@@ -535,6 +535,15 @@ struct HomeView: View {
     }
 
     // MARK: - 手势
+
+    /// 播放牌堆里正中那张的上/下一张（`delta` 为 -1 / +1）。
+    /// 直接用 `play(track:in:source:)`：同队列换歌只挪 index，封面和声音一定同步走。
+    private func playAdjacent(_ delta: Int) {
+        guard !tracks.isEmpty else { return }
+        let target = min(max(index + delta, 0), tracks.count - 1)
+        guard target != index, let track = tracks[safe: target] else { return }
+        player.play(track: track, in: tracks, source: source.queueSource)
+    }
 
     private func deckDrag(_ m: DeckMetrics) -> some Gesture {
         DragGesture(minimumDistance: 8)
