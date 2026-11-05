@@ -44,6 +44,26 @@ struct HomeView: View {
     /// 浏览牌堆不会改它 —— 所以背景是一块稳定的氛围底，不是跟着手指跑的灯。
     @State private var backdropTrack: Track?
 
+    // MARK: 歌词模式（按住封面往左滑）
+
+    /// 歌词面板是否处于展开状态（松手吸附后的稳定值）。
+    @State private var lyricsOpen = false
+    /// 展开进度 0~1，拖动时实时跟手，松手后带动画吸附到 0 或 1。
+    @State private var lyricsProgress: CGFloat = 0
+    /// 这一笔拖动定下的轴向。一旦定了横/竖就不再换，
+    /// 避免斜着拖时牌堆和歌词面板来回打架。
+    @State private var dragAxis: DragAxis?
+    /// 进入横向拖动那一刻的展开进度（0 或 1），位移在此基础上累加。
+    @State private var axisStartProgress: CGFloat = 0
+    /// 当前曲目的歌词与加载状态。
+    @State private var lyricLines: [LyricLine] = []
+    @State private var lyricLoading = false
+    @State private var lyricTrackID: Int?
+
+    enum DragAxis {
+        case vertical, horizontal
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -96,6 +116,14 @@ struct HomeView: View {
                     backdropTrack = playing
                 }
             }
+            // 歌词面板开着时切了歌：跟着换歌词，面板保持展开。
+            if lyricsOpen {
+                lyricTrackID = nil   // 强制重取
+                Task { await loadLyrics() }
+            }
+        }
+        .onChange(of: lyricsOpen) { _, open in
+            if open { Task { await loadLyrics() } }
         }
     }
 
@@ -225,14 +253,22 @@ struct HomeView: View {
             // 牌堆单独一层、通屏铺满：卡片可以一路滑到状态栏和标签栏底下。
             GeometryReader { geo in
                 let metrics = DeckMetrics(size: geo.size)
-                deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
-                // 点正中封面以上的空白 = 翻到上一张，以下 = 下一张。
-                //
-                // 只翻页、不播放 —— 相当于按了一下方向键，按了正中那张才是回车。
-                // 用户用它精确定位：点一下挪一张，看到想听的翻到正中再点它。
-                    .onTapGesture(count: 1, coordinateSpace: .local) { loc in
-                        slide(loc.y < metrics.centerY ? -1 : 1)
-                    }
+                ZStack {
+                    deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
+                    // 点正中封面以上的空白 = 翻到上一张，以下 = 下一张。
+                    //
+                    // 只翻页、不播放 —— 相当于按了一下方向键，按了正中那张才是回车。
+                    // 用户用它精确定位：点一下挪一张，看到想听的翻到正中再点它。
+                        .onTapGesture(count: 1, coordinateSpace: .local) { loc in
+                            slide(loc.y < metrics.centerY ? -1 : 1)
+                        }
+
+                    // 歌词面板：盖在封面原本的位置上 —— 系统材质做局部高斯模糊，
+                    // 上面滚歌词。打开后才接收点击（点行跳进度）。
+                    lyricsPanel(metrics)
+                        .opacity(Double(lyricsProgress))
+                        .allowsHitTesting(lyricsOpen)
+                }
             }
             .ignoresSafeArea()
 
@@ -288,6 +324,17 @@ struct HomeView: View {
 
                     card(tracks[i], at: i, depth: d, side: m.side)
                         .offset(y: shift + m.travel(d))
+                        // 歌词模式：正中那张挪到屏幕左侧并向内倾一点，
+                        // 原位让给模糊面板 + 歌词。weight 只对正中附近生效，
+                        // 翻到别的卡时归零，牌堆恢复原状。
+                        .offset(x: -m.width * 0.22 * lyricsWeight(d))
+                        .scaleEffect(1 - 0.13 * lyricsWeight(d))
+                        .rotation3DEffect(
+                            .degrees(-12 * Double(lyricsWeight(d))),
+                            axis: (x: 0, y: 1, z: 0),
+                            anchor: .center,
+                            perspective: 0.6
+                        )
                         .zIndex(-abs(d))
                 }
             }
@@ -533,6 +580,38 @@ struct HomeView: View {
         .allowsHitTesting(false)
     }
 
+    /// 歌词模式下第 d 张的位移/倾斜权重：正中那张 1，往外一张线性衰减到 0。
+    /// 乘上全局展开进度，拖到一半时牌堆跟着走到一半。
+    private func lyricsWeight(_ d: CGFloat) -> CGFloat {
+        max(0, 1 - abs(d)) * lyricsProgress
+    }
+
+    /// 歌词面板。盖在封面原本的位置（正中偏右），系统材质做局部高斯模糊，
+    /// 上面是滚动歌词；面板本身可以往右拖回关上。
+    private func lyricsPanel(_ m: DeckMetrics) -> some View {
+        LyricsPanel(
+            lines: lyricLines,
+            isLoading: lyricLoading,
+            currentTime: player.currentTime
+        ) { time in
+            player.seek(to: time)
+        }
+        .frame(width: m.width * 0.56,
+               height: min(m.side * 1.04, m.height * 0.52))
+        .background(
+            .ultraThinMaterial,
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(.white.opacity(0.10), lineWidth: 0.8)
+        }
+        .shadow(color: .black.opacity(0.35 * Double(lyricsProgress)), radius: 24, y: 12)
+        // ZStack 居中，整体右移到封面原位：中心落在屏宽 70% 处。
+        .offset(x: m.width * 0.20)
+        .gesture(lyricsPanelDrag)
+    }
+
     // MARK: - 手势
 
     /// 把牌堆翻到正中那张的上/下一张（`delta` 为 -1 / +1），只挪位置、不播放。
@@ -553,56 +632,125 @@ struct HomeView: View {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
                 guard !tracks.isEmpty else { return }
-                // 明显是横向划动时不动牌堆，避免和系统手势打架。
-                guard abs(value.translation.height) >= abs(value.translation.width) else { return }
+                let h = value.translation.height
+                let w = value.translation.width
 
-                if tickSlot == nil { DeckHaptics.prepare() }
+                // 轴向判定：这一笔先动过 10pt 时定死横/竖，此后不再换向 ——
+                // 斜着拖不会出现牌堆和歌词面板来回抢。
+                if dragAxis == nil {
+                    if abs(w) > 10, abs(w) > abs(h) * 1.25 {
+                        dragAxis = .horizontal
+                        axisStartProgress = lyricsOpen ? 1 : 0
+                        DeckHaptics.prepare()
+                    } else if abs(h) > 10 {
+                        dragAxis = .vertical
+                    }
+                }
 
-                var offset = value.translation.height
-                // 到头了给一点阻尼，别让整摞牌直接滑出屏幕。
-                if index == 0 && offset > 0 { offset *= 0.35 }
-                if index >= tracks.count - 1 && offset < 0 { offset *= 0.35 }
+                switch dragAxis {
+                case .horizontal:
+                    // 往左滑展开歌词，往右收回。170pt 走完全程。
+                    lyricsProgress = min(max(axisStartProgress - w / 170, 0), 1)
 
-                // 长按后的快速模式：同样的手指距离翻接近两倍的牌。
-                let gain: CGFloat = fastScroll ? 1.9 : 1.0
-                drag = offset * gain
+                case .vertical:
+                    if tickSlot == nil { DeckHaptics.prepare() }
 
-                // 每越过一张卡就打一个轻点 —— 手指滑动的过程中就该有反馈，
-                // 而不是等松手吸附那一下才震。
-                let slot = Int((CGFloat(index) - offset * gain / m.step).rounded())
-                let clamped = min(max(slot, 0), tracks.count - 1)
-                if clamped != tickSlot {
-                    tickSlot = clamped
-                    liveSlot = clamped
-                    DeckHaptics.tick()
+                    var offset = h
+                    // 到头了给一点阻尼，别让整摞牌直接滑出屏幕。
+                    if index == 0 && offset > 0 { offset *= 0.35 }
+                    if index >= tracks.count - 1 && offset < 0 { offset *= 0.35 }
+
+                    // 长按后的快速模式：同样的手指距离翻接近两倍的牌。
+                    let gain: CGFloat = fastScroll ? 1.9 : 1.0
+                    drag = offset * gain
+
+                    // 每越过一张卡就打一个轻点 —— 手指滑动的过程中就该有反馈，
+                    // 而不是等松手吸附那一下才震。
+                    let slot = Int((CGFloat(index) - offset * gain / m.step).rounded())
+                    let clamped = min(max(slot, 0), tracks.count - 1)
+                    if clamped != tickSlot {
+                        tickSlot = clamped
+                        liveSlot = clamped
+                        DeckHaptics.tick()
+                    }
+
+                case nil:
+                    break
                 }
             }
             .onEnded { value in
-                guard !tracks.isEmpty else { return }
-
-                // 回到预测位移：松手那一刻系统会预测手指的落点，轻扫也能稳稳翻一张，
-                // 比只看实际位移顺手。灵敏度靠两层压住 ——
-                // 普通模式一次最多 2 张；慢拖必须真的越过半张才算数（预测值小，取整后是 0）。
-                let raw = -(value.predictedEndTranslation.height * (fastScroll ? 1.9 : 1.0)) / m.step
-                var step = Int(raw.rounded())
-                if !fastScroll, abs(step) < 1 {
-                    // 慢拖没过半张，但手上有明显的快扫速度 → 认 1 张。
-                    if value.velocity.height < -1300 { step = 1 }
-                    else if value.velocity.height > 1300 { step = -1 }
+                switch dragAxis {
+                case .horizontal:
+                    finishLyricsDrag(value)
+                case .vertical:
+                    endVerticalDrag(value, step: m.step)
+                case nil:
+                    break
                 }
-                let limit = fastScroll ? 8 : 2
-                step = min(max(step, -limit), limit)
-
-                let target = min(max(index + step, 0), tracks.count - 1)
-
-                tickSlot = nil
-                liveSlot = target
-                fastScroll = false
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
-                    index = target
-                    drag = 0
-                }
+                dragAxis = nil
             }
+    }
+
+    /// 歌词面板上的拖动：只管横向收回（面板里竖向留给歌词滚动）。
+    private var lyricsPanelDrag: some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { value in
+                guard dragAxis == nil || dragAxis == .horizontal else { return }
+                if dragAxis == nil {
+                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                    dragAxis = .horizontal
+                    axisStartProgress = lyricsOpen ? 1 : 0
+                }
+                lyricsProgress = min(max(axisStartProgress - value.translation.width / 170, 0), 1)
+            }
+            .onEnded { value in
+                guard dragAxis == .horizontal else { return }
+                finishLyricsDrag(value)
+                dragAxis = nil
+            }
+    }
+
+    /// 松手时按进度吸附：过半就算开，另外轻扫速度也认。
+    private func finishLyricsDrag(_ value: DragGesture.Value) {
+        let wantOpen = lyricsProgress > 0.5
+            || (!lyricsOpen && value.velocity.width < -900)
+            || (lyricsOpen && value.velocity.width > 900)
+
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+            lyricsProgress = wantOpen ? 1 : 0
+        }
+        guard wantOpen != lyricsOpen else { return }
+        lyricsOpen = wantOpen
+        DeckHaptics.tick(intensity: 0.8)
+        if wantOpen { Task { await loadLyrics() } }
+    }
+
+    /// 竖向拖动的松手结算（从 deckDrag 拆出来，让横向/竖向各管各的）。
+    private func endVerticalDrag(_ value: DragGesture.Value, step: CGFloat) {
+        guard !tracks.isEmpty else { return }
+
+        // 回到预测位移：松手那一刻系统会预测手指的落点，轻扫也能稳稳翻一张，
+        // 比只看实际位移顺手。灵敏度靠两层压住 ——
+        // 普通模式一次最多 2 张；慢拖必须真的越过半张才算数（预测值小，取整后是 0）。
+        let raw = -(value.predictedEndTranslation.height * (fastScroll ? 1.9 : 1.0)) / step
+        var stepCount = Int(raw.rounded())
+        if !fastScroll, abs(stepCount) < 1 {
+            // 慢拖没过半张，但手上有明显的快扫速度 → 认 1 张。
+            if value.velocity.height < -1300 { stepCount = 1 }
+            else if value.velocity.height > 1300 { stepCount = -1 }
+        }
+        let limit = fastScroll ? 8 : 2
+        stepCount = min(max(stepCount, -limit), limit)
+
+        let target = min(max(index + stepCount, 0), tracks.count - 1)
+
+        tickSlot = nil
+        liveSlot = target
+        fastScroll = false
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+            index = target
+            drag = 0
+        }
     }
 
     /// 长按进入快速翻牌：按住别动约半秒（打一次重触感），然后直接拖，
@@ -659,6 +807,21 @@ struct HomeView: View {
     }
 
     // MARK: - 数据
+
+    /// 拉当前曲目的歌词。切歌时 `lyricTrackID` 被清空，这里会重取；
+    /// 同一首歌重复打开面板走 LyricsStore 的缓存，不发请求。
+    private func loadLyrics() async {
+        guard let track = player.current else {
+            lyricLines = []
+            lyricTrackID = nil
+            return
+        }
+        guard lyricTrackID != track.id else { return }
+        lyricLoading = lyricLines.isEmpty
+        defer { lyricLoading = false }
+        lyricLines = await LyricsStore.shared.lines(for: track.id)
+        lyricTrackID = track.id
+    }
 
     private func bootstrap() async {
         #if DEBUG
@@ -781,6 +944,13 @@ struct HomeView: View {
            player.current == nil,
            let first = tracks.first {
             player.play(track: first, in: tracks, source: source.queueSource)
+        }
+
+        // 调试：直接进入歌词模式（模拟器无法合成拖动手势）。
+        if env["HOME_LYRICS"] == "1" {
+            lyricsOpen = true
+            lyricsProgress = 1
+            Task { await loadLyrics() }
         }
     }
     #endif

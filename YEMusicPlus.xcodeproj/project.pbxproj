@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXFileReference section */
-		AB12CD34EF56000000000001 /* YEMusicPlus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = YEMusicPlus.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AB12CD34EF56000000000001 /* FlowMusic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FlowMusic.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -53,7 +53,7 @@
 		AB12CD34EF56000000000005 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				AB12CD34EF56000000000001 /* YEMusicPlus.app */,
+				AB12CD34EF56000000000001 /* FlowMusic.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -80,7 +80,7 @@
 			packageProductDependencies = (
 			);
 			productName = YEMusicPlus;
-			productReference = AB12CD34EF56000000000001 /* YEMusicPlus.app */;
+			productReference = AB12CD34EF56000000000001 /* FlowMusic.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
