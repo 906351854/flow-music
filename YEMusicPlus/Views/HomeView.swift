@@ -327,10 +327,10 @@ struct HomeView: View {
                         // 歌词模式：正中那张挪到屏幕左侧并向内倾一点，
                         // 原位让给模糊面板 + 歌词。weight 只对正中附近生效，
                         // 翻到别的卡时归零，牌堆恢复原状。
-                        .offset(x: -m.width * 0.22 * lyricsWeight(d))
-                        .scaleEffect(1 - 0.13 * lyricsWeight(d))
+                        .offset(x: -m.width * 0.24 * lyricsWeight(d))
+                        .scaleEffect(1 - 0.16 * lyricsWeight(d))
                         .rotation3DEffect(
-                            .degrees(-12 * Double(lyricsWeight(d))),
+                            .degrees(-13 * Double(lyricsWeight(d))),
                             axis: (x: 0, y: 1, z: 0),
                             anchor: .center,
                             perspective: 0.6
@@ -342,7 +342,11 @@ struct HomeView: View {
         .frame(width: m.width, height: m.height)
         .mask(deckMask(m))
         .contentShape(Rectangle())
-        .gesture(deckDrag(m))
+        // 高优先级：拖动必须赢过正中那张的 Button，否则「按住封面左滑」这一笔
+        // 会被 Button 整个吃掉 —— 手感上就是按住左滑毫无反应。之前竖向翻牌
+        // 能用纯属起手都落在上下空白处；左滑必须按在封面上，才暴露了这个坑。
+        // DragGesture 要先走 8pt 才算成立，单击/长按依然归 Button，互不干扰。
+        .highPriorityGesture(deckDrag(m))
         .simultaneousGesture(fastScrollGesture)
     }
 
@@ -586,8 +590,14 @@ struct HomeView: View {
         max(0, 1 - abs(d)) * lyricsProgress
     }
 
-    /// 歌词面板。盖在封面原本的位置（正中偏右），系统材质做局部高斯模糊，
-    /// 上面是滚动歌词；面板本身可以往右拖回关上。
+    /// 歌词面板：无边界的一团柔和模糊 + 上面滚歌词。
+    ///
+    /// 不是一张带描边阴影的「卡片」—— 那种有棱有角的东西和整个页面的气质不合，
+    /// 用户点名要 `.soft` 边缘效果那种同款：没有边界，只有一团雾。
+    /// 做法是材质铺满整块区域，然后用「上下 + 左右」两条羽化渐变做 mask，
+    /// 边缘一路淡到零，和系统 scroll edge effect 是同一种观感。
+    /// 歌词的上下渐隐用的也是这同一层 mask —— 文字不是被裁在面板里，
+    /// 是溶进模糊里去的。
     private func lyricsPanel(_ m: DeckMetrics) -> some View {
         LyricsPanel(
             lines: lyricLines,
@@ -596,19 +606,40 @@ struct HomeView: View {
         ) { time in
             player.seek(to: time)
         }
-        .frame(width: m.width * 0.56,
+        .frame(width: m.width * 0.54,
                height: min(m.side * 1.04, m.height * 0.52))
-        .background(
-            .ultraThinMaterial,
-            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(.white.opacity(0.10), lineWidth: 0.8)
+        .background {
+            Rectangle()
+                .fill(.ultraThinMaterial)
         }
-        .shadow(color: .black.opacity(0.35 * Double(lyricsProgress)), radius: 24, y: 12)
-        // ZStack 居中，整体右移到封面原位：中心落在屏宽 70% 处。
-        .offset(x: m.width * 0.20)
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.20),
+                    .init(color: .black, location: 0.80),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+        .mask {
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.14),
+                    .init(color: .black, location: 0.86),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+        // ZStack 居中，整体右移到封面原位。注意纵向也要跟着挪：
+        // 牌堆的封面中心在 40% 屏高处（centerY），而 ZStack 的中线在 50% ——
+        // 不补这段差，面板会比封面低一截，两边的羽化对不上。
+        .offset(x: m.width * 0.21, y: m.centerY - m.height / 2)
         .gesture(lyricsPanelDrag)
     }
 
@@ -635,10 +666,10 @@ struct HomeView: View {
                 let h = value.translation.height
                 let w = value.translation.width
 
-                // 轴向判定：这一笔先动过 10pt 时定死横/竖，此后不再换向 ——
+                // 轴向判定：这一笔先动过 8pt 时定死横/竖，此后不再换向 ——
                 // 斜着拖不会出现牌堆和歌词面板来回抢。
                 if dragAxis == nil {
-                    if abs(w) > 10, abs(w) > abs(h) * 1.25 {
+                    if abs(w) > 8, abs(w) > abs(h) * 1.15 {
                         dragAxis = .horizontal
                         axisStartProgress = lyricsOpen ? 1 : 0
                         DeckHaptics.prepare()
