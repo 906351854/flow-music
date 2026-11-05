@@ -1,0 +1,43 @@
+{
+  "upstream": {
+    "webHost": "music.163.com",
+    "interfaceHost": "interface.music.163.com",
+    "referer": "https://music.163.com"
+  },
+  "client": {
+    "clientName": "NetEaseMusic",
+    "userAgent": "NetEaseMusicDesktop 9.0.90/5038 (iPhone; iOS 16.2; zh_CN)",
+    "appVersion": "3.1.17.204416",
+    "osVersion": "Microsoft-Windows-10-Professional-build-19045-64bit",
+    "versionCode": "140",
+    "channel": "netease",
+    "resolution": "1920x1080"
+  },
+  "quality": {
+    "defaultLevel": "exhigh",
+    "encodeType": "flac",
+    "levels": [
+      { "id": "standard", "name": "标准" },
+      { "id": "higher", "name": "较高" },
+      { "id": "exhigh", "name": "极高" },
+      { "id": "lossless", "name": "无损" },
+      { "id": "hires", "name": "Hi-Res" }
+    ]
+  },
+  "endpoints": {
+    "search": "/cloudsearch/pc",
+    "toplists": "/toplist/detail",
+    "playlistDetail": "/v6/playlist/detail",
+    "songURL": "/song/enhance/player/url/v1",
+    "lyric": "/song/lyric",
+    "qrUnikey": "/login/qrcode/unikey",
+    "qrCheck": "/login/qrcode/client/login",
+    "account": "/nuser/account/get",
+    "dailyRecommend": "/v3/discovery/recommend/songs",
+    "userPlaylist": "/user/playlist"
+  },
+  "qr": {
+    "type": 3,
+    "pollInterval": 2.0
+  }
+}

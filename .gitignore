@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+
+# Xcode 构建产物
+build/
+build2/
+build_device/
+build_release/
+build_sign/
+dist/
+DerivedData/
+*.ipa
+
+# Xcode 用户数据（签名、断点、个人设备记录）
+**/xcuserdata/
+*.xcuserstate
+
+# 本地备份 / 开发截图（后者可能带账号信息，一律不进仓库）
+.backup/
+screenshots/
+preview-*.png
