@@ -559,6 +559,15 @@ struct HomeView: View {
     // MARK: - 背景
 
     private func backdrop(_ track: Track) -> some View {
+        ambientFog(track)
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+    }
+
+    /// 环境底：当前曲目封面的重模糊 + 自上而下压暗。
+    /// 背景用它，歌词面板的羽化罩也用同一份 —— 罩的像素和真正的环境
+    /// 一模一样，玻璃的硬边才能溶进背景里不留痕。
+    private func ambientFog(_ track: Track) -> some View {
         ZStack {
             AsyncImage(url: track.coverURL, transaction: Transaction(animation: .easeOut(duration: 0.5))) { phase in
                 if case .success(let image) = phase {
@@ -582,8 +591,6 @@ struct HomeView: View {
                 endPoint: .bottom
             )
         }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
     }
 
     /// 歌词模式下第 d 张的位移/倾斜权重：正中那张 1，往外一张线性衰减到 0。
@@ -610,36 +617,50 @@ struct HomeView: View {
         }
         .frame(width: m.width * 0.62,
                height: min(m.side * 1.20, m.height * 0.56))
+        // 玻璃用裸的 UIVisualEffectView（真模糊有保证，但边是硬的，且绝不能
+        // 套 mask/alpha —— 一套就打断背景采样，模糊整个消失）。
+        // 硬边靠上面叠的「同源环境羽化罩」溶掉：罩的像素和真正的环境一模一样
+        // （同一张封面、同样的模糊和压暗，按屏幕坐标原路对齐回去），
+        // 边缘渐实，玻璃的边界就消失在环境里。mask 罩在图片上没有副作用。
         .background {
-            Rectangle()
-                .fill(.ultraThinMaterial)
-                // 材质已经是最低档（ultraThin），透明度决定雾的浓淡 ——
-                // 用户定稿 30%：能明确感觉到玻璃感，但不压暗底下的画面。
-                .opacity(0.30)
-        }
-        .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.20),
-                    .init(color: .black, location: 0.80),
-                    .init(color: .clear, location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        .mask {
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.14),
-                    .init(color: .black, location: 0.86),
-                    .init(color: .clear, location: 1),
-                ],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
+            ZStack {
+                FrostedGlass()
+
+                if let track = backdropTrack {
+                    ambientFog(track)
+                        .frame(width: m.width, height: m.height)
+                        // 面板在舞台上偏了 (0.12w, centerY - h/2)，罩原路搬回去，
+                        // 和背景的像素一一对齐。
+                        .offset(x: -(m.width * 0.12), y: -(m.centerY - m.height / 2))
+                        // 边缘实、中心透的羽化罩：纵向、横向两条渐变相乘。
+                        // 罩顶到 0.85 而不是 1.0 —— 留一丝玻璃的存在感。
+                        .mask {
+                            LinearGradient(
+                                stops: [
+                                    .init(color: .black.opacity(0.85), location: 0),
+                                    .init(color: .clear, location: 0.32),
+                                    .init(color: .clear, location: 0.68),
+                                    .init(color: .black.opacity(0.85), location: 1),
+                                ],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .mask {
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: .black.opacity(0.85), location: 0),
+                                        .init(color: .clear, location: 0.30),
+                                        .init(color: .clear, location: 0.70),
+                                        .init(color: .black.opacity(0.85), location: 1),
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            }
+                        }
+                        .allowsHitTesting(false)
+                }
+            }
         }
         // ZStack 居中，整体右移到封面原位。注意纵向也要跟着挪：
         // 牌堆的封面中心在 40% 屏高处（centerY），而 ZStack 的中线在 50% ——

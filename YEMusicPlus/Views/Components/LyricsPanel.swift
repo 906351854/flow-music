@@ -39,6 +39,21 @@ struct LyricsPanel: View {
                 scrollView
             }
         }
+        // 歌词文字自己的上下渐隐 —— 只 mask 文字（mask 不会伤到文字），
+        // 和背景玻璃那团椭圆羽化接在一起：文字是溶进雾里去的。
+        // 注意千万别把这层 mask 套到玻璃上，Material/玻璃被 mask 一拍平就废。
+        .mask(
+            LinearGradient(
+                stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.18),
+                    .init(color: .black, location: 0.82),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
     }
 
     private var scrollView: some View {
@@ -80,7 +95,7 @@ struct LyricsPanel: View {
         let text = line.text.isEmpty ? "♪" : line.text
 
         return Text(text)
-            .font(.system(size: isActive ? 17 : 15,
+            .font(.system(size: isActive ? 19 : 15,
                           weight: isActive ? .semibold : .regular))
             .foregroundStyle(isActive ? Color.white : Color.white.opacity(dimness))
             .lineLimit(3)
