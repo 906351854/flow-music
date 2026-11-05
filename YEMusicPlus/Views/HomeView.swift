@@ -609,13 +609,13 @@ struct HomeView: View {
             player.seek(to: time)
         }
         .frame(width: m.width * 0.62,
-               height: min(m.side * 1.35, m.height * 0.62))
+               height: min(m.side * 1.20, m.height * 0.56))
         .background {
             Rectangle()
                 .fill(.ultraThinMaterial)
-                // 材质已经是最低档（ultraThin），再压到一成 ——
-                // 要的是几乎察觉不到的一层雾，不是一块深色玻璃。
-                .opacity(0.10)
+                // 材质已经是最低档（ultraThin），透明度决定雾的浓淡 ——
+                // 用户定稿 30%：能明确感觉到玻璃感，但不压暗底下的画面。
+                .opacity(0.30)
         }
         .mask {
             LinearGradient(
