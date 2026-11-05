@@ -226,13 +226,12 @@ struct HomeView: View {
             GeometryReader { geo in
                 let metrics = DeckMetrics(size: geo.size)
                 deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
-                // 点正中封面以上的空白 = 上一张（并播放），以下 = 下一张。
+                // 点正中封面以上的空白 = 翻到上一张，以下 = 下一张。
                 //
-                // 不直接调 player.previous()/next()：previous 有「播过 3 秒先回到开头」
-                // 的系统语义，歌放着的时候点上方永远只是重播；next 走的是播放器队列，
-                // 和牌堆对不上时会出现封面和歌各走各的。以牌堆当前位置为基准最直观。
+                // 只翻页、不播放 —— 相当于按了一下方向键，按了正中那张才是回车。
+                // 用户用它精确定位：点一下挪一张，看到想听的翻到正中再点它。
                     .onTapGesture(count: 1, coordinateSpace: .local) { loc in
-                        playAdjacent(loc.y < metrics.centerY ? -1 : 1)
+                        slide(loc.y < metrics.centerY ? -1 : 1)
                     }
             }
             .ignoresSafeArea()
@@ -536,13 +535,18 @@ struct HomeView: View {
 
     // MARK: - 手势
 
-    /// 播放牌堆里正中那张的上/下一张（`delta` 为 -1 / +1）。
-    /// 直接用 `play(track:in:source:)`：同队列换歌只挪 index，封面和声音一定同步走。
-    private func playAdjacent(_ delta: Int) {
+    /// 把牌堆翻到正中那张的上/下一张（`delta` 为 -1 / +1），只挪位置、不播放。
+    /// 点上下空白处走这里 —— 定位用，按了正中封面才开始播。
+    private func slide(_ delta: Int) {
         guard !tracks.isEmpty else { return }
         let target = min(max(index + delta, 0), tracks.count - 1)
-        guard target != index, let track = tracks[safe: target] else { return }
-        player.play(track: track, in: tracks, source: source.queueSource)
+        guard target != index else { return }
+        tickSlot = nil
+        liveSlot = target
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+            index = target
+            drag = 0
+        }
     }
 
     private func deckDrag(_ m: DeckMetrics) -> some Gesture {
