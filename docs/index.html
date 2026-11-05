@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Flow Music</title>
-<meta name="description" content="Flow Music——一摞可以翻的唱片。用 SwiftUI 写的网易云音乐客户端。">
+<title>Flow Music — 一摞可以翻的唱片</title>
+<meta name="description" content="Flow Music，一摞可以翻的唱片。用 SwiftUI 写的网易云音乐客户端，首页没有列表，只有一摞立体的封面。">
 <meta name="theme-color" content="#000000">
 <link rel="icon" href="icon.png">
 <style>
@@ -104,11 +104,14 @@
     color: var(--accent);
   }
   .display {
-    font-size: clamp(38px, 6.1vw, 72px);
-    line-height: 1.12;
-    letter-spacing: -.028em;
-    font-weight: 600;
-    color: #f5f5f7;
+    font-size: clamp(44px, 7vw, 92px);
+    line-height: 1.05;
+    letter-spacing: -.03em;
+    font-weight: 700;
+    background: linear-gradient(180deg, #fff 42%, #a1a1a6 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
   .headline {
     font-size: clamp(28px, 4.2vw, 48px);
@@ -462,9 +465,9 @@
     <!-- Hero -->
     <section class="hero">
       <img class="hero-icon rise" src="icon.png" alt="Flow Music 图标">
-      <h1 class="display rise d1">一摞可以翻的唱片。</h1>
+      <h1 class="display rise d1">Flow&nbsp;Music</h1>
       <p class="sub rise d2">
-        一个用 SwiftUI 写的网易云音乐客户端。<br>
+        一摞可以翻的唱片。<br>
         首页没有列表，只有一摞立体的封面。
       </p>
 
