@@ -99,8 +99,9 @@ struct PlayerBar: View {
             }
         }
         // 嵌入标签栏时系统容器只留了很窄的边，自己再补一段，封面才不会贴着屏幕边。
+        // 控制区整体再往左挪一点，别贴着胶囊右缘。
         .padding(.leading, embedded ? 16 : 10)
-        .padding(.trailing, embedded ? 4 : 8)
+        .padding(.trailing, embedded ? 16 : 18)
         .padding(.vertical, embedded ? 0 : 7)
         .modifier(PlayerBarGlass(embedded: embedded))
         .contentShape(.rect)

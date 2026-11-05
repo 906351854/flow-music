@@ -226,14 +226,24 @@ struct HomeView: View {
             GeometryReader { geo in
                 let metrics = DeckMetrics(size: geo.size)
                 deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
+                // 点正中封面以上的空白 = 上一曲，以下 = 下一曲。
+                // 正中封面自己是 Button，会先吃掉点击，不会漏到这里。
+                    .onTapGesture(count: 1, coordinateSpace: .local) { loc in
+                        guard !tracks.isEmpty else { return }
+                        if loc.y < metrics.centerY {
+                            player.previous()
+                        } else {
+                            player.next()
+                        }
+                    }
             }
             .ignoresSafeArea()
 
-            // 上下压暗也通屏铺，标签栏玻璃采到的颜色才是连续的。
-            scrims
-
             infoLayer
         }
+        // 顶边 / 底边的压暗交给系统的 soft 边缘效果（iOS 26 原生），不再自己画渐变。
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .scrollEdgeEffectStyle(.soft, for: .bottom)
         // 吸附到新的一张时给一次稍重的撞击。
         .sensoryFeedback(.impact(weight: .light, intensity: 0.85), trigger: index)
         // 长按后没拖就松手时，拖动手势的 onEnded 不会跑，快速模式会残留 ——
@@ -245,42 +255,6 @@ struct HomeView: View {
                 if fastScroll { fastScroll = false }
             }
         }
-    }
-
-    /// 顶部 / 底部压暗。用整屏高度的独立图层，而不是塞在安全区里的两块渐变 ——
-    /// 后者会在标签栏上沿留出一条没压暗的亮边，看起来就是一道断层。
-    private var scrims: some View {
-        VStack(spacing: 0) {
-            LinearGradient(
-                stops: [
-                    .init(color: Theme.base.opacity(0.90), location: 0),
-                    .init(color: Theme.base.opacity(0.62), location: 0.52),
-                    .init(color: Theme.base.opacity(0.16), location: 0.88),
-                    .init(color: .clear, location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 168)
-
-            Spacer(minLength: 0)
-
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: Theme.base.opacity(0.22), location: 0.24),
-                    .init(color: Theme.base.opacity(0.58), location: 0.48),
-                    .init(color: Theme.base.opacity(0.86), location: 0.68),
-                    .init(color: Theme.base.opacity(0.92), location: 0.88),
-                    .init(color: Theme.base.opacity(0.90), location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .frame(height: 430)
-        }
-        .ignoresSafeArea()
-        .allowsHitTesting(false)
     }
 
     /// 信息区。放在安全区内，由系统保证它永远在标签栏 / 迷你播放条上方，
