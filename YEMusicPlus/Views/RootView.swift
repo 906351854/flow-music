@@ -5,6 +5,9 @@ struct RootView: View {
     @State private var selection: Int = 0
     @State private var showNowPlaying = false
     @State private var showLoginDebug = false
+    /// 轻提示（试听片段 / 音质降级 / 自动跳过）的显示任务。
+    @State private var noticeTask: Task<Void, Never>?
+    @State private var showNotice = false
 
     var body: some View {
         // 用系统真正的 tabViewBottomAccessory，而不是自己压一条悬浮胶囊。
@@ -47,6 +50,40 @@ struct RootView: View {
             Button("好", role: .cancel) { player.errorMessage = nil }
         } message: {
             Text(player.errorMessage ?? "")
+        }
+        // 轻提示：不值得弹窗的反馈（试听片段、降级、自动跳过）从这里飘一条，
+        // 顶部居中，2.8s 自己消失。
+        .overlay(alignment: .top) {
+            if showNotice, let notice = player.notice {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(notice)
+                        .font(.system(size: 12.5, weight: .medium))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
+                .padding(.horizontal, 40)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .onChange(of: player.notice) { _, value in
+            noticeTask?.cancel()
+            guard value != nil else {
+                showNotice = false
+                return
+            }
+            withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { showNotice = true }
+            noticeTask = Task {
+                try? await Task.sleep(for: .seconds(2.8))
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeOut(duration: 0.3)) { showNotice = false }
+            }
         }
         .task { await runDebugScenario() }
     }

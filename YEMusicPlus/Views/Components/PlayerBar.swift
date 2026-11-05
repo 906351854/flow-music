@@ -68,13 +68,25 @@ struct PlayerBar: View {
                 .buttonStyle(.plain)
             }
 
+            // 上一曲 / 下一曲对称摆放。上一曲沿用系统语义：播过 3 秒先回到开头。
+            Button {
+                player.previous()
+            } label: {
+                Image(systemName: "backward.fill")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .frame(width: 30, height: 32)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+
             Button {
                 player.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white.opacity(0.82))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 30, height: 32)
                     .contentShape(.rect)
             }
             .buttonStyle(.plain)

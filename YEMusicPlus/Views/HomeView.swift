@@ -37,6 +37,9 @@ struct HomeView: View {
     /// 调试用：让牌堆停在两张之间（`HOME_START_INDEX=3.5`），检查交棒那一瞬的姿态。
     /// 正常运行时恒为 0，一次加法，可以忽略。
     @State private var debugShift: CGFloat = 0
+    /// 长按进入的「快速翻牌」模式：同样的手指距离翻更多张，
+    /// 用来在大歌单里快速巡航。松手即退出。
+    @State private var fastScroll = false
     /// 背景取色用的曲目。只在播放器真的有当前曲目时才更新，
     /// 浏览牌堆不会改它 —— 所以背景是一块稳定的氛围底，不是跟着手指跑的灯。
     @State private var backdropTrack: Track?
@@ -233,6 +236,15 @@ struct HomeView: View {
         }
         // 吸附到新的一张时给一次稍重的撞击。
         .sensoryFeedback(.impact(weight: .light, intensity: 0.85), trigger: index)
+        // 长按后没拖就松手时，拖动手势的 onEnded 不会跑，快速模式会残留 ——
+        // 这里兜底：进入后 2.5s 内没有走到 onEnded（onEnded 会先把它置回 false）就自动退出。
+        .onChange(of: fastScroll) { _, on in
+            guard on else { return }
+            Task {
+                try? await Task.sleep(for: .seconds(2.5))
+                if fastScroll { fastScroll = false }
+            }
+        }
     }
 
     /// 顶部 / 底部压暗。用整屏高度的独立图层，而不是塞在安全区里的两块渐变 ——
@@ -303,7 +315,7 @@ struct HomeView: View {
                 ForEach(lower...upper, id: \.self) { i in
                     let d = CGFloat(i) - progress
 
-                    card(tracks[i], depth: d, side: m.side)
+                    card(tracks[i], at: i, depth: d, side: m.side)
                         .offset(y: shift + m.travel(d))
                         .zIndex(-abs(d))
                 }
@@ -313,6 +325,7 @@ struct HomeView: View {
         .mask(deckMask(m))
         .contentShape(Rectangle())
         .gesture(deckDrag(m))
+        .simultaneousGesture(fastScrollGesture)
     }
 
     /// 只做底部渐隐。顶部不再遮罩 —— 卡片本来就该滑到状态栏底下，
@@ -337,7 +350,7 @@ struct HomeView: View {
 
     // MARK: - 单张卡片
 
-    private func card(_ track: Track, depth d: CGFloat, side: CGFloat) -> some View {
+    private func card(_ track: Track, at i: Int, depth d: CGFloat, side: CGFloat) -> some View {
         let isCenter = abs(d) < 0.5
         // 交棒区间（0.5~0.85 张）两张都走 HDR —— 只在正中那 0.5 张里切的话，
         // 换手的一瞬间会一张亮一张暗，闪一下。
@@ -347,11 +360,18 @@ struct HomeView: View {
         // 用 Button 而不是 onTapGesture：只有 Button 能把「按下」这个中间状态给出来，
         // 才做得出下沉回弹。外层有拖动手势，但手指一移动 Button 就让位，不会抢滑动。
         // 封面上不再画播放按钮 —— 底部播放条已经有一个，两张同时出现太吵。
+        //
+        // 点非正中的卡 = 翻到那张（不播放）。上下露出的封面一直是「死」的，
+        // 想精确翻页只能拖；现在直接点它就跳过去，连续点上方两下就是翻两张。
         return Button {
-            if isCurrent {
-                player.togglePlayPause()
+            if isCenter {
+                if isCurrent {
+                    player.togglePlayPause()
+                } else {
+                    player.play(track: track, in: tracks, source: source.queueSource)
+                }
             } else {
-                player.play(track: track, in: tracks, source: source.queueSource)
+                slide(to: i)
             }
         } label: {
             Group {
@@ -387,8 +407,10 @@ struct HomeView: View {
         )
         .opacity(fade(d))
         .shadow(color: .black.opacity(shadowAlpha(d)), radius: 18, y: 10)
-        .allowsHitTesting(isCenter)
-        .accessibilityLabel("播放 \(track.name)")
+        // 牌堆里渲染到的卡都能点：点到的总是 zIndex 最高的那张，
+        // 也就是视觉上「最上面露出」的封面。远处淡出的卡点不到也没关系。
+        .allowsHitTesting(abs(d) <= 4.5)
+        .accessibilityLabel(isCenter ? "播放 \(track.name)" : "翻到 \(track.name)")
     }
 
     private func scale(_ d: CGFloat) -> CGFloat {
@@ -545,6 +567,18 @@ struct HomeView: View {
 
     // MARK: - 手势
 
+    /// 翻到第 i 张（只翻页，不播放）。点上下露出的封面走这里。
+    private func slide(to target: Int) {
+        let clamped = min(max(target, 0), tracks.count - 1)
+        guard clamped != index else { return }
+        tickSlot = nil
+        liveSlot = clamped
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
+            index = clamped
+            drag = 0
+        }
+    }
+
     private func deckDrag(_ m: DeckMetrics) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
@@ -558,11 +592,14 @@ struct HomeView: View {
                 // 到头了给一点阻尼，别让整摞牌直接滑出屏幕。
                 if index == 0 && offset > 0 { offset *= 0.35 }
                 if index >= tracks.count - 1 && offset < 0 { offset *= 0.35 }
-                drag = offset
+
+                // 长按后的快速模式：同样的手指距离翻接近两倍的牌。
+                let gain: CGFloat = fastScroll ? 1.9 : 1.0
+                drag = offset * gain
 
                 // 每越过一张卡就打一个轻点 —— 手指滑动的过程中就该有反馈，
                 // 而不是等松手吸附那一下才震。
-                let slot = Int((CGFloat(index) - offset / m.step).rounded())
+                let slot = Int((CGFloat(index) - offset * gain / m.step).rounded())
                 let clamped = min(max(slot, 0), tracks.count - 1)
                 if clamped != tickSlot {
                     tickSlot = clamped
@@ -572,16 +609,42 @@ struct HomeView: View {
             }
             .onEnded { value in
                 guard !tracks.isEmpty else { return }
-                let raw = -value.predictedEndTranslation.height / m.step
-                let step = min(max(Int(raw.rounded()), -2), 2)
+
+                // 只信实际位移：之前用 predictedEndTranslation（预测松手后的位置），
+                // 轻扫一下预测就能冲出去两三张，停点全靠运气 —— 这就是「太灵敏」。
+                // 现在普通模式下没滑过半张就回弹，速度只借最多 1 张的惯性。
+                var step = Int((-(value.translation.height * (fastScroll ? 1.9 : 1.0)) / m.step).rounded())
+                if !fastScroll, step == 0 {
+                    let v = value.velocity.height
+                    if v < -1500 { step = 1 }       // 向上快扫 → 下一张
+                    else if v > 1500 { step = -1 }
+                }
+                let limit = fastScroll ? 8 : 2
+                step = min(max(step, -limit), limit)
+
                 let target = min(max(index + step, 0), tracks.count - 1)
 
                 tickSlot = nil
                 liveSlot = target
+                fastScroll = false
                 withAnimation(.spring(response: 0.42, dampingFraction: 0.84)) {
                     index = target
                     drag = 0
                 }
+            }
+    }
+
+    /// 长按进入快速翻牌：按住别动约半秒（打一次重触感），然后直接拖，
+    /// 同样的距离能连着翻好几张，松手恢复。对付几百首的大歌单用。
+    ///
+    /// 用 simultaneous 而不是 sequenced：后者会让普通拖动先被长按阶段
+    /// 卡住 0.4s，拖起来就「黏」了。残留状态靠 onEnded + 计时兜底清掉。
+    private var fastScrollGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.42, maximumDistance: 14)
+            .onEnded { _ in
+                guard !fastScroll else { return }
+                fastScroll = true
+                DeckHaptics.tick(intensity: 1.0)
             }
     }
 

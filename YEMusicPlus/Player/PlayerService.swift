@@ -249,7 +249,7 @@ final class PlayerService: ObservableObject {
             index = 0
             queueSource = .single
         }
-        Task { await loadCurrent(autoPlay: true) }
+        Task { await loadCurrent(autoPlay: true, autoSkip: false) }
     }
 
     func togglePlayPause() {
@@ -260,7 +260,7 @@ final class PlayerService: ObservableObject {
             return
         }
         if player.currentItem == nil {
-            Task { await loadCurrent(autoPlay: true) }
+            Task { await loadCurrent(autoPlay: true, autoSkip: false) }
         } else {
             try? AVAudioSession.sharedInstance().setActive(true)
             player.play()
@@ -311,7 +311,7 @@ final class PlayerService: ObservableObject {
             if target < 0 { target = queue.count - 1 }
             index = max(0, min(target, queue.count - 1))
         }
-        Task { await loadCurrent(autoPlay: true) }
+        Task { await loadCurrent(autoPlay: true, autoSkip: true) }
     }
 
     // MARK: - 取流
@@ -321,44 +321,99 @@ final class PlayerService: ObservableObject {
     private var streamCache: [String: (data: SongURLData, at: Date)] = [:]
     private static let streamTTL: TimeInterval = 10 * 60
 
+    /// 连续自动跳过的次数。数字别太大 —— 队列一半都不能播时，
+    /// 静默跳完一整个歌单比停下来告诉用户更糟。
+    private var consecutiveFailures = 0
+    private var autoSkipTask: Task<Void, Never>?
+
     /// 取播放地址。碰到 -460 风控时换一个 deviceId 再试一次 ——
     /// 实测风控是按设备标识累积的，换标识立刻就能恢复，比让用户等有用。
-    private func fetchStreamURL(for track: Track) async throws -> SongURLData? {
-        let key = "\(track.id)-\(qualityLevel)"
+    private func fetchStreamURL(for track: Track, level: String) async throws -> SongURLData? {
+        let key = "\(track.id)-\(level)"
         if let hit = streamCache[key], Date().timeIntervalSince(hit.at) < Self.streamTTL {
             return hit.data
         }
 
         let data: SongURLData?
         do {
-            data = try await MusicAPI.songURL(id: track.id, level: qualityLevel)
+            data = try await MusicAPI.songURL(id: track.id, level: level)
         } catch MusicAPIError.business(let code, _) where code == -460 {
             MusicClient.shared.rotateDeviceID()
             try? await Task.sleep(for: .milliseconds(500))
-            data = try await MusicAPI.songURL(id: track.id, level: qualityLevel)
+            data = try await MusicAPI.songURL(id: track.id, level: level)
         }
 
-        if let data {
+        if let data, data.url?.isEmpty == false {
             streamCache[key] = (data, Date())
         }
         return data
     }
 
-    private func loadCurrent(autoPlay: Bool) async {
+    /// 音质降级链：从用户选的档位一路降到标准。
+    /// config 里 levels 按低 → 高排列，反转后就是「从当前档往下」。
+    private func qualityDowngradeChain() -> [String] {
+        let ids = AppConfig.shared.quality.levels.map(\.id)
+        guard let idx = ids.firstIndex(of: qualityLevel) else { return [qualityLevel] }
+        return Array(ids[...idx].reversed())
+    }
+
+    /// 拿一个**真的能播**的地址：请求的音质没有音源（VIP / 版权 / 该歌没这档）时
+    /// 自动往下降档重试，而不是直接把错误甩给用户。
+    /// 大多数「播放错误」都是这个原因 —— 歌在，只是你要的那档音质没有。
+    private func fetchPlayableStream(for track: Track) async throws -> (data: SongURLData, url: URL) {
+        var lastBusinessCode = -110
+
+        for level in qualityDowngradeChain() {
+            do {
+                if let data = try await fetchStreamURL(for: track, level: level),
+                   let url = MusicAPI.playableURL(from: data.url) {
+                    if level != qualityLevel {
+                        notice = "「\(track.name)」没有\(qualityLabel)音源，已降到「\(levelName(level))」"
+                    }
+                    return (data, url)
+                }
+            } catch MusicAPIError.business(let code, _) where code == -460 {
+                lastBusinessCode = code
+                continue // fetchStreamURL 内部已换过设备号重试过一次，仍不行就试下一档
+            }
+        }
+        throw MusicAPIError.business(code: lastBusinessCode, message: nil)
+    }
+
+    private func levelName(_ id: String) -> String {
+        AppConfig.shared.quality.levels.first { $0.id == id }?.name ?? id
+    }
+
+    /// 把接口错误翻译成用户能看懂的话。弹 Alert 之前先过这一道。
+    private func friendlyMessage(_ error: Error, track: Track) -> String {
+        if case MusicAPIError.business(let code, let message) = error {
+            switch code {
+            case -110:
+                return "「\(track.name)」暂时无法播放：可能需要 VIP，或暂无音源。"
+            case -460:
+                return "操作太频繁，被服务端限流了，稍等片刻再试。"
+            default:
+                return message ?? "播放出错（\(code)）"
+            }
+        }
+        return error.localizedDescription
+    }
+
+    /// 载入当前曲目。
+    ///
+    /// `autoSkip`：自动切歌（advance / 播完下一首）带来的失败应该静默跳过 ——
+    /// 歌单里混几首没音源的，不能每首都弹一个 Alert 拦住人。
+    /// 用户主动点歌的失败仍然弹窗说清楚。
+    private func loadCurrent(autoPlay: Bool, autoSkip: Bool) async {
         guard let track = current else { return }
         isLoading = true
         errorMessage = nil
         notice = nil
+        autoSkipTask?.cancel()
         defer { isLoading = false }
 
         do {
-            guard let data = try await fetchStreamURL(for: track) else {
-                throw MusicAPIError.business(code: -110, message: nil)
-            }
-            guard let url = MusicAPI.playableURL(from: data.url) else {
-                let code = data.code ?? -110
-                throw MusicAPIError.business(code: code, message: nil)
-            }
+            let (data, url) = try await fetchPlayableStream(for: track)
 
             let item = AVPlayerItem(url: url)
             player.replaceCurrentItem(with: item)
@@ -366,6 +421,7 @@ final class PlayerService: ObservableObject {
             duration = Double(track.durationMS) / 1000
             currentTime = 0
             streamLevel = data.level
+            consecutiveFailures = 0
 
             if data.isTrialOnly {
                 notice = "会员曲目，当前仅提供试听片段"
@@ -386,8 +442,21 @@ final class PlayerService: ObservableObject {
             isPlaying = false
             duration = 0
             currentTime = 0
-            errorMessage = error.localizedDescription
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+
+            consecutiveFailures += 1
+            let canSkip = autoSkip && queue.count > 1 && consecutiveFailures < 4
+            if canSkip {
+                notice = "「\(track.name)」无法播放，自动跳到下一首"
+                autoSkipTask = Task {
+                    try? await Task.sleep(for: .seconds(1.4))
+                    guard !Task.isCancelled else { return }
+                    advance(forward: true)
+                }
+            } else {
+                consecutiveFailures = 0
+                errorMessage = friendlyMessage(error, track: track)
+            }
         }
     }
 
