@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import MediaPlayer
 import UIKit
+import UserNotifications
 import os.log
 
 @MainActor
@@ -66,7 +67,25 @@ final class PlayerService: ObservableObject {
     @Published private(set) var queue: [Track] = []
     @Published private(set) var index: Int = -1
     @Published private(set) var queueSource: QueueSource = .single
-    @Published private(set) var isPlaying = false
+    /// 播放期间挂一个「禁止系统空闲睡眠」断言：
+    /// iPad App 跑在 Mac 上时，换歌空档 / 缓冲的短暂静音会让 macOS 认为没事干
+    /// 而触发空闲睡眠，一睡播放就断。停止播放时立刻放开断言。
+    @Published private(set) var isPlaying = false {
+        didSet {
+            guard isPlaying != oldValue else { return }
+            if isPlaying {
+                if sleepAssertion == nil {
+                    sleepAssertion = ProcessInfo.processInfo.beginActivity(
+                        options: [.idleSystemSleepDisabled, .userInitiated],
+                        reason: "Flow Music 正在播放"
+                    )
+                }
+            } else if let activity = sleepAssertion {
+                ProcessInfo.processInfo.endActivity(activity)
+                sleepAssertion = nil
+            }
+        }
+    }
     @Published private(set) var isLoading = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
@@ -95,6 +114,9 @@ final class PlayerService: ObservableObject {
     // MARK: - 私有
 
     private let player = AVPlayer()
+    private var sleepAssertion: NSObjectProtocol?
+    /// seek 进行中：观察器回报的旧时间在闸外排队（见 seek(to:)）。
+    private var isSeeking = false
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private var interruptionObserver: NSObjectProtocol?
@@ -184,13 +206,44 @@ final class PlayerService: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let seconds = time.seconds
+                // seek 进行中观察器只会拿到旧位置（见 seek(to:)），忽略这次的回报。
+                guard !self.isSeeking else { return }
                 self.currentTime = seconds.isFinite ? max(seconds, 0) : 0
                 if let item = self.player.currentItem {
                     let total = item.duration.seconds
                     if total.isFinite, total > 0 { self.duration = total }
                 }
                 self.pushNowPlayingInfo()
+                self.watchdogTick()
             }
+        }
+    }
+
+    /// 后台存活的关键：AVPlayer 因为网络抖动进入 waiting 时，
+    /// iOS 只容忍几秒「该响没响」就把 App 挂起 —— 挂起后网络恢复也救不回来。
+    /// 这里周期性巡检，先原地拉起；约 10 秒还不出声就判定断流，重取地址重播。
+    private func watchdogTick() {
+        guard isPlaying else {
+            stallTicks = 0
+            return
+        }
+        switch player.timeControlStatus {
+        case .playing:
+            stallTicks = 0
+        case .waitingToPlayAtSpecifiedRate, .paused:
+            stallTicks += 1
+            if stallTicks == 8 { // 0.4s × 8 ≈ 3.2s 没出声，先续一口
+                try? AVAudioSession.sharedInstance().setActive(true)
+                player.play()
+            } else if stallTicks >= 25 { // ≈10s 还不行，多半是连接断了
+                stallTicks = 0
+                if let track = current {
+                    streamCache.removeValue(forKey: "\(track.id)-\(qualityLevel)")
+                    Task { await loadCurrent(autoPlay: true, autoSkip: true) }
+                }
+            }
+        @unknown default:
+            break
         }
     }
 
@@ -219,6 +272,9 @@ final class PlayerService: ObservableObject {
             pushNowPlayingInfo()
             return
         }
+        // 换歌的空档也要让会话保持活跃 —— 后台加载下一首的几秒里，
+        // 会话一断 iOS 就可能把 App 挂起，表现就是「放完一首后台就停了」。
+        try? AVAudioSession.sharedInstance().setActive(true)
         advance(forward: true)
     }
 
@@ -282,7 +338,13 @@ final class PlayerService: ObservableObject {
 
     func seek(to seconds: Double) {
         let clamped = min(max(seconds, 0), max(duration, 0))
-        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600)) { _ in }
+        // seek 完成前，周期性时间观察器会拿「旧时间」回报一次 ——
+        // 界面上就是滑块松手后瞬间闪回原位、再跳回来。加闸：
+        // seek 进行中观察器的回报一律忽略，完成后放行。
+        isSeeking = true
+        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600)) { [weak self] _ in
+            MainActor.assumeIsolated { self?.isSeeking = false }
+        }
         currentTime = clamped
         pushNowPlayingInfo()
     }
@@ -296,6 +358,21 @@ final class PlayerService: ObservableObject {
         let all = RepeatMode.allCases
         let nextIndex = (all.firstIndex(of: repeatMode).map { $0 + 1 } ?? 0) % all.count
         repeatMode = all[nextIndex]
+        if repeatMode != .one { lastNonOneRepeat = repeatMode }
+    }
+
+    /// 「单曲循环前的模式」：关掉单曲循环时回到它，不粗暴跳回列表循环。
+    /// 轮换按钮和一键开关都会维护它。
+    @Published private(set) var lastNonOneRepeat: RepeatMode = .all
+
+    /// 一键开/关单曲循环：开着就回到之前的模式，没开就切到单曲循环。
+    func toggleRepeatOne() {
+        if repeatMode == .one {
+            repeatMode = lastNonOneRepeat
+        } else {
+            lastNonOneRepeat = repeatMode
+            repeatMode = .one
+        }
     }
 
     private func advance(forward: Bool) {
@@ -325,6 +402,13 @@ final class PlayerService: ObservableObject {
     /// 静默跳完一整个歌单比停下来告诉用户更糟。
     private var consecutiveFailures = 0
     private var autoSkipTask: Task<Void, Never>?
+
+    /// 卡顿看门狗计数：isPlaying 却连续多个 tick 没出声就拉一次。
+    /// 后台里 AVPlayer 停在网络缓冲时 iOS 会很快挂起 App，挂起后永远回不来。
+    private var stallTicks = 0
+
+    /// 下一首取流地址的预取任务。
+    private var prefetchTask: Task<Void, Never>?
 
     /// 取播放地址。碰到 -460 风控时换一个 deviceId 再试一次 ——
     /// 实测风控是按设备标识累积的，换标识立刻就能恢复，比让用户等有用。
@@ -384,6 +468,42 @@ final class PlayerService: ObservableObject {
         AppConfig.shared.quality.levels.first { $0.id == id }?.name ?? id
     }
 
+    /// 趁当前歌还在放，把下一首的取流地址提前拉好塞进缓存。
+    /// 歌与歌的衔接从「现发请求等响应」缩成「直接装」，
+    /// 后台里那个容易被系统挂起的空档窗口就基本归零了。
+    private func schedulePrefetch() {
+        prefetchTask?.cancel()
+        let next: Track?
+        if queue.indices.contains(index + 1) {
+            next = queue[index + 1]
+        } else if repeatMode != .off, let first = queue.first {
+            next = first
+        } else {
+            next = nil
+        }
+        guard let next, next.id != current?.id else { return }
+        let level = qualityLevel
+        prefetchTask = Task { [weak self] in
+            _ = try? await self?.fetchStreamURL(for: next, level: level)
+        }
+    }
+
+    /// 后台里彻底播不动时发一条本地通知 —— 不然用户只会觉得「它悄悄停了」，
+    /// 回到前台才知道是这歌没音源。授权请求在拿到结果前不会打扰人。
+    private func notifyStopInBackground(reason: String) {
+        guard UIApplication.shared.applicationState != .active else { return }
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert]) { granted, _ in
+            guard granted else { return }
+            let content = UNMutableNotificationContent()
+            content.title = "Flow Music 已停止播放"
+            content.body = reason
+            let request = UNNotificationRequest(identifier: "playback-stopped",
+                                                content: content, trigger: nil)
+            center.add(request)
+        }
+    }
+
     /// 把接口错误翻译成用户能看懂的话。弹 Alert 之前先过这一道。
     private func friendlyMessage(_ error: Error, track: Track) -> String {
         if case MusicAPIError.business(let code, let message) = error {
@@ -422,6 +542,7 @@ final class PlayerService: ObservableObject {
             currentTime = 0
             streamLevel = data.level
             consecutiveFailures = 0
+            stallTicks = 0
 
             if data.isTrialOnly {
                 notice = "会员曲目，当前仅提供试听片段"
@@ -437,6 +558,7 @@ final class PlayerService: ObservableObject {
 
             loadArtwork(for: track)
             pushNowPlayingInfo()
+            schedulePrefetch()
         } catch {
             player.replaceCurrentItem(with: nil)
             isPlaying = false
@@ -455,7 +577,9 @@ final class PlayerService: ObservableObject {
                 }
             } else {
                 consecutiveFailures = 0
-                errorMessage = friendlyMessage(error, track: track)
+                let message = friendlyMessage(error, track: track)
+                errorMessage = message
+                notifyStopInBackground(reason: message)
             }
         }
     }

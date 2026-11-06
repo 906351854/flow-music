@@ -38,7 +38,9 @@ struct RootView: View {
             }
         }
         .animation(.smooth(duration: 0.28), value: player.current?.id)
-        .fullScreenCover(isPresented: $showNowPlaying) {
+        // 正在播放页和「选择歌单」同款弹出样式：sheet + 拖拽指示条，
+        // 下滑即关闭，不再占满全屏。
+        .sheet(isPresented: $showNowPlaying) {
             NowPlayingView()
         }
         #if DEBUG

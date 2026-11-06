@@ -40,9 +40,6 @@ struct HomeView: View {
     /// 长按进入的「快速翻牌」模式：同样的手指距离翻更多张，
     /// 用来在大歌单里快速巡航。松手即退出。
     @State private var fastScroll = false
-    /// 背景取色用的曲目。只在播放器真的有当前曲目时才更新，
-    /// 浏览牌堆不会改它 —— 所以背景是一块稳定的氛围底，不是跟着手指跑的灯。
-    @State private var backdropTrack: Track?
 
     // MARK: 歌词模式（按住封面往左滑）
 
@@ -67,19 +64,9 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                // 背景只在「有当前曲目」时取封面色，并且只跟着 player 走。
-                // 浏览时滑过十几张，背景一次都不换 —— 之前它绑在 index 上，
-                // 每停一张就整屏换一次色，看久了很晃。
-                //
-                // 必须放在 overlay 里：`scaledToFill` 的模糊封面会按比例溢出，
-                // 直接当 ZStack 的子视图会把整个页面撑宽（实测 675pt），
-                // 页面里的东西会按超宽居中排版，左右被裁到屏幕外。
+                // 底色（含当前封面糊成的环境雾）已内置进 AppBackground ——
+                // 主页和其他界面共用同一份渲染，颜色天然统一。
                 AppBackground()
-                    .overlay {
-                        if let backdropTrack {
-                            backdrop(backdropTrack)
-                        }
-                    }
 
                 content
             }
@@ -110,12 +97,8 @@ struct HomeView: View {
         }
         .onChange(of: player.current?.id) { _, newValue in
             followPlayer(newValue)
-            // 换歌了才换底色。暂停、浏览、拖动手势都不动它。
-            if let playing = player.current {
-                withAnimation(.easeOut(duration: 0.55)) {
-                    backdropTrack = playing
-                }
-            }
+            // 换歌了才换底色（底色已内置进 AppBackground，跟 player 走）。
+            // 暂停、浏览、拖动手势都不动它。
             // 歌词面板开着时切了歌：跟着换歌词，面板保持展开。
             if lyricsOpen {
                 lyricTrackID = nil   // 强制重取
@@ -253,21 +236,26 @@ struct HomeView: View {
             // 牌堆单独一层、通屏铺满：卡片可以一路滑到状态栏和标签栏底下。
             GeometryReader { geo in
                 let metrics = DeckMetrics(size: geo.size)
+                let progress = CGFloat(index) - drag / metrics.step + debugShift
                 ZStack {
-                    deck(metrics, progress: CGFloat(index) - drag / metrics.step + debugShift)
-                    // 点正中封面以上的空白 = 翻到上一张，以下 = 下一张。
-                    //
-                    // 只翻页、不播放 —— 相当于按了一下方向键，按了正中那张才是回车。
-                    // 用户用它精确定位：点一下挪一张，看到想听的翻到正中再点它。
+                    // 三层结构：两侧专辑（底）→ 歌词 + 全屏模糊（中）→ 正中专辑（顶）。
+                    // 收起歌词时中层的 opacity 是 0、顶层和牌堆画法一致，看不出分层。
+                    deck(metrics, progress: progress)
+                        // 点正中封面以上的空白 = 翻到上一张，以下 = 下一张。
+                        //
+                        // 只翻页、不播放 —— 相当于按了一下方向键，按了正中那张才是回车。
+                        // 用户用它精确定位：点一下挪一张，看到想听的翻到正中再点它。
                         .onTapGesture(count: 1, coordinateSpace: .local) { loc in
                             slide(loc.y < metrics.centerY ? -1 : 1)
                         }
 
-                    // 歌词面板：盖在封面原本的位置上 —— 系统材质做局部高斯模糊，
-                    // 上面滚歌词。打开后才接收点击（点行跳进度）。
-                    lyricsPanel(metrics)
-                        .opacity(Double(lyricsProgress))
-                        .allowsHitTesting(lyricsOpen)
+                    // 歌词层：铺满整个舞台 —— 系统材质 + 同源环境羽化罩 + 滚动歌词，
+                    // 盖在两侧专辑之上。打开后才接收点击（点行跳进度、右滑收回）。
+                    lyricsLayer(metrics)
+
+                    // 正中那张提到最顶层，盖在歌词层上面 —— 歌词展开时它往左
+                    // 挪开并大幅内倾，两侧的专辑则留在雾底下。
+                    centerCard(metrics, progress: progress)
                 }
             }
             .ignoresSafeArea()
@@ -310,6 +298,10 @@ struct HomeView: View {
 
     /// 一摞卡片。只在正中那张附近渲染 9 张，其余靠 offset 推到屏外。
     /// 歌单有几千首也只创建这 9 张 —— 这是「大歌单不卡」的第一道闸。
+    ///
+    /// 正中那张在这里和在最顶层各画一份：动画（轻点翻页的滑动）全靠
+    /// ForEach 里稳定的卡片身份做 offset 插值 —— 摘出去就会变成原地换图的硬切。
+    /// 顶层那份平时 opacity 0，展开歌词时盖在雾上面保持清晰。
     private func deck(_ m: DeckMetrics, progress: CGFloat) -> some View {
         let center = Int(progress.rounded())
         let lower = max(0, center - 4)
@@ -324,15 +316,12 @@ struct HomeView: View {
 
                     card(tracks[i], at: i, depth: d, side: m.side)
                         .offset(y: shift + m.travel(d))
-                        // 歌词模式：正中那张挪到屏幕左侧并向内倾一点，
-                        // 原位让给模糊面板 + 歌词。weight 只对正中附近生效，
-                        // 翻到别的卡时归零，牌堆恢复原状。
-                        .offset(x: -m.width * 0.28 * lyricsWeight(d))
-                        .scaleEffect(1 - 0.22 * lyricsWeight(d))
-                        // 正角绕 Y 轴：右边往里转（朝歌词面板的方向退进屏幕），
-                        // 像一扇朝里开的门。之前是负角，右边翻向外了，方向反。
+                        // 歌词模式：正中那张往左贴边（允许出屏）并内倾 70°，
+                        // 原位让给雾 + 歌词。weight 只对正中那张生效。
+                        .offset(x: -m.width * 0.8 * lyricsWeight(d))
+                        .scaleEffect(1 - 0.30 * lyricsWeight(d))
                         .rotation3DEffect(
-                            .degrees(45 * Double(lyricsWeight(d))),
+                            .degrees(70 * Double(lyricsWeight(d))),
                             axis: (x: 0, y: 1, z: 0),
                             anchor: .center,
                             perspective: 0.6
@@ -344,11 +333,45 @@ struct HomeView: View {
         .frame(width: m.width, height: m.height)
         .mask(deckMask(m))
         .contentShape(Rectangle())
-        // 高优先级：拖动必须赢过正中那张的 Button，否则「按住封面左滑」这一笔
-        // 会被 Button 整个吃掉 —— 手感上就是按住左滑毫无反应。之前竖向翻牌
-        // 能用纯属起手都落在上下空白处；左滑必须按在封面上，才暴露了这个坑。
-        // DragGesture 要先走 8pt 才算成立，单击/长按依然归 Button，互不干扰。
-        .highPriorityGesture(deckDrag(m))
+        // 拖动用并行识别而不是高优先级：高优先级在手指落下的瞬间就接管事件流，
+        // Button 的 pressed 状态永远亮不起来 —— 正中封面「按下去下沉、抬手弹起」
+        // 的反馈就是这么消失的。并行识别下两者同时跑：拖动照常（越过 8pt 阈值
+        // Button 自动让位），单击/长按 Button 照常，按下反馈也回来了。
+        .simultaneousGesture(deckDrag(m))
+        .simultaneousGesture(fastScrollGesture)
+    }
+
+    /// 正中那张的顶层副本：两侧专辑（底）→ 歌词+模糊（中）→ 它（顶）。
+    /// 牌堆里那张在雾底下会被玻璃糊到，这份以 lyricsProgress 淡入，
+    /// 永远清晰地浮在雾上面。变换和牌堆那份逐像素一致，交叉过渡无痕。
+    private func centerCard(_ m: DeckMetrics, progress: CGFloat) -> some View {
+        let center = Int(progress.rounded())
+        let shift = m.centerY - m.height / 2
+
+        return Group {
+            if tracks.indices.contains(center) {
+                let d = CGFloat(center) - progress
+
+                card(tracks[center], at: center, depth: d, side: m.side)
+                    .offset(y: shift + m.travel(d))
+                    .offset(x: -m.width * 0.8 * lyricsWeight(d))
+                    .scaleEffect(1 - 0.30 * lyricsWeight(d))
+                    .rotation3DEffect(
+                        .degrees(70 * Double(lyricsWeight(d))),
+                        axis: (x: 0, y: 1, z: 0),
+                        anchor: .center,
+                        perspective: 0.6
+                    )
+            }
+        }
+        .frame(width: m.width, height: m.height)
+        // 收起时完全透明且不接事件，轻点/拖动全部落在牌堆那份上；
+        // 展开后它盖在雾上，轻点播放/暂停、按住左滑都归它。
+        // 手势同样用并行识别（理由见牌堆），且只在展开时才挂 ——
+        // 收起时挂着也会抢底下 Button 的按下反馈。
+        .opacity(Double(lyricsProgress))
+        .allowsHitTesting(lyricsProgress > 0.01)
+        .simultaneousGesture(lyricsProgress > 0.01 ? deckDrag(m) : nil)
         .simultaneousGesture(fastScrollGesture)
     }
 
@@ -558,40 +581,9 @@ struct HomeView: View {
 
     // MARK: - 背景
 
-    private func backdrop(_ track: Track) -> some View {
-        ambientFog(track)
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
-    }
-
-    /// 环境底：当前曲目封面的重模糊 + 自上而下压暗。
-    /// 背景用它，歌词面板的羽化罩也用同一份 —— 罩的像素和真正的环境
-    /// 一模一样，玻璃的硬边才能溶进背景里不留痕。
-    private func ambientFog(_ track: Track) -> some View {
-        ZStack {
-            AsyncImage(url: track.coverURL, transaction: Transaction(animation: .easeOut(duration: 0.5))) { phase in
-                if case .success(let image) = phase {
-                    image
-                        .resizable()
-                        .scaledToFill()
-                        .blur(radius: 64, opaque: true)
-                        .scaleEffect(1.4)
-                }
-            }
-            .id(track.id)
-            .transition(.opacity)
-
-            LinearGradient(
-                stops: [
-                    .init(color: Theme.base.opacity(0.26), location: 0),
-                    .init(color: Theme.base.opacity(0.50), location: 0.42),
-                    .init(color: Theme.base.opacity(0.86), location: 1),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-    }
+    // 环境雾（AmbientFog）已上移到 AppBackground.swift 成为全局共享组件：
+    // AppBackground 内置了跟随正在播放曲目的那层雾，主页不再自备一份，
+    // 歌词层直接用共享组件，两层雾和页面背景的色调永远一致。
 
     /// 歌词模式下第 d 张的位移/倾斜权重：正中那张 1，往外一张线性衰减到 0。
     /// 乘上全局展开进度，拖到一半时牌堆跟着走到一半。
@@ -607,65 +599,70 @@ struct HomeView: View {
     /// 边缘一路淡到零，和系统 scroll edge effect 是同一种观感。
     /// 歌词的上下渐隐用的也是这同一层 mask —— 文字不是被裁在面板里，
     /// 是溶进模糊里去的。
-    private func lyricsPanel(_ m: DeckMetrics) -> some View {
-        LyricsPanel(
-            lines: lyricLines,
-            isLoading: lyricLoading,
-            currentTime: player.currentTime
-        ) { time in
-            player.seek(to: time)
-        }
-        .frame(width: m.width * 0.62,
-               height: min(m.side * 1.20, m.height * 0.56))
-        // 玻璃用裸的 UIVisualEffectView（真模糊有保证，但边是硬的，且绝不能
-        // 套 mask/alpha —— 一套就打断背景采样，模糊整个消失）。
-        // 硬边靠上面叠的「同源环境羽化罩」溶掉：罩的像素和真正的环境一模一样
-        // （同一张封面、同样的模糊和压暗，按屏幕坐标原路对齐回去），
-        // 边缘渐实，玻璃的边界就消失在环境里。mask 罩在图片上没有副作用。
-        .background {
-            ZStack {
-                FrostedGlass()
+    /// 歌词层：铺满整个舞台的无边界柔和模糊 + 上面滚歌词。
+    ///
+    /// 层级：两侧专辑（底）→ 这层（中）→ 正中专辑（顶）。
+    /// 雾全部自绘、不依赖系统玻璃采样 —— UIVisualEffectView 的强度没有官方旋钮，
+    /// 用 alpha 衰减只会让玻璃按透明度混回去（18% 强度 = 82% 看到未模糊的背景，
+    /// 观感就是「模糊消失」）。自己把封面糊出来永远不会失效：
+    /// 底层是 radius 64 的重雾（和页面背景同一份渲染，四边天生无缝），
+    /// 上层是 radius 18 的轻雾（用户要的 18% 观感），中心实、四边羽化溶进底层。
+    private func lyricsLayer(_ m: DeckMetrics) -> some View {
+        ZStack {
+            if let track = player.current {
+                // 底：重雾，和页面背景完全同源 —— 层的边缘天然接不上缝。
+                AmbientFog(track: track)
+                    .frame(width: m.width, height: m.height)
+                    .allowsHitTesting(false)
 
-                if let track = backdropTrack {
-                    ambientFog(track)
-                        .frame(width: m.width, height: m.height)
-                        // 面板在舞台上偏了 (0.12w, centerY - h/2)，罩原路搬回去，
-                        // 和背景的像素一一对齐。
-                        .offset(x: -(m.width * 0.12), y: -(m.centerY - m.height / 2))
-                        // 边缘实、中心透的羽化罩：纵向、横向两条渐变相乘。
-                        // 罩顶到 0.85 而不是 1.0 —— 留一丝玻璃的存在感。
+                // 上：轻雾。中心实、四边羽化，边缘露出底下的重雾，没有边界。
+                AmbientFog(track: track, blur: 18)
+                    .frame(width: m.width, height: m.height)
+                    .mask {
+                        LinearGradient(
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .black.opacity(0.92), location: 0.28),
+                                .init(color: .black.opacity(0.92), location: 0.72),
+                                .init(color: .clear, location: 1),
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
                         .mask {
                             LinearGradient(
                                 stops: [
-                                    .init(color: .black.opacity(0.85), location: 0),
-                                    .init(color: .clear, location: 0.32),
-                                    .init(color: .clear, location: 0.68),
-                                    .init(color: .black.opacity(0.85), location: 1),
+                                    .init(color: .clear, location: 0),
+                                    .init(color: .black.opacity(0.92), location: 0.26),
+                                    .init(color: .black.opacity(0.92), location: 0.74),
+                                    .init(color: .clear, location: 1),
                                 ],
-                                startPoint: .top,
-                                endPoint: .bottom
+                                startPoint: .leading,
+                                endPoint: .trailing
                             )
-                            .mask {
-                                LinearGradient(
-                                    stops: [
-                                        .init(color: .black.opacity(0.85), location: 0),
-                                        .init(color: .clear, location: 0.30),
-                                        .init(color: .clear, location: 0.70),
-                                        .init(color: .black.opacity(0.85), location: 1),
-                                    ],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            }
                         }
-                        .allowsHitTesting(false)
-                }
+                    }
+                    .allowsHitTesting(false)
             }
+
+            LyricsPanel(
+                lines: lyricLines,
+                isLoading: lyricLoading,
+                currentTime: player.currentTime
+            ) { time in
+                player.seek(to: time)
+            }
+            // 铺满之后歌词不再锚在封面原位：正中专辑提到顶层后向左贴边
+            // （0.58w，左缘大幅出屏，投影右缘约到 43%），歌词列占
+            // 中间偏右（44%~96%），长行自动折行（lineLimit 3），互不遮挡。
+            // 纵向仍对齐封面高度（centerY），和牌堆的重心一致。
+            .frame(width: m.width * 0.52,
+                   height: min(m.side * 1.25, m.height * 0.62))
+            .offset(x: m.width * 0.20, y: m.centerY - m.height / 2)
         }
-        // ZStack 居中，整体右移到封面原位。注意纵向也要跟着挪：
-        // 牌堆的封面中心在 40% 屏高处（centerY），而 ZStack 的中线在 50% ——
-        // 不补这段差，面板会比封面低一截，两边的羽化对不上。
-        .offset(x: m.width * 0.12, y: m.centerY - m.height / 2)
+        .frame(width: m.width, height: m.height)
+        .opacity(Double(lyricsProgress))
+        .allowsHitTesting(lyricsOpen)
         .gesture(lyricsPanelDrag)
     }
 
@@ -978,14 +975,6 @@ struct HomeView: View {
         }
         index = pos
         liveSlot = pos
-
-        if let current = player.current {
-            // 背景始终跟着「正在放的」走。切歌单只是换牌堆，
-            // 只要还在放歌，底色就不该被浏览行为改掉。
-            backdropTrack = current
-        } else {
-            backdropTrack = list.first
-        }
     }
 
     #if DEBUG

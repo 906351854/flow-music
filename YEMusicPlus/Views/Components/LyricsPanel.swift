@@ -60,7 +60,7 @@ struct LyricsPanel: View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 // 上下留白约 1/4 面板高，首尾行才有可能滚到正中间。
-                LazyVStack(alignment: .leading, spacing: 22) {
+                LazyVStack(alignment: .center, spacing: 22) {
                     ForEach(lines) { line in
                         row(line)
                     }
@@ -95,17 +95,19 @@ struct LyricsPanel: View {
         let text = line.text.isEmpty ? "♪" : line.text
 
         return Text(text)
-            .font(.system(size: isActive ? 19 : 15,
+            .font(.system(size: isActive ? 22 : 17,
                           weight: isActive ? .semibold : .regular))
             .foregroundStyle(isActive ? Color.white : Color.white.opacity(dimness))
             .lineLimit(3)
-            // 锚在行首缩放，左对齐不散架 —— 行本身的占位不变，
-            // 缩小只是视觉上的退后，不会把下面的行顶来顶去。
-            .scaleEffect(falloff, anchor: .leading)
+            .multilineTextAlignment(.center)
+            // 锚在中心缩放，行在列里居中对齐 —— 缩小只是视觉上的退后，
+            // 行本身的占位不变，不会把下面的行顶来顶去。
+            .scaleEffect(falloff, anchor: .center)
             .animation(.easeInOut(duration: 0.3), value: activeIndex)
             .onTapGesture {
                 // 点击任意一行跳到那句 —— 歌词本来就是最好的进度条。
                 onSeek(line.time)
             }
+            .frame(maxWidth: .infinity)
     }
 }

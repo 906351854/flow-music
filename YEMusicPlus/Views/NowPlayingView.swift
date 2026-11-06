@@ -2,7 +2,11 @@ import SwiftUI
 
 struct NowPlayingView: View {
     @EnvironmentObject private var player: PlayerService
-    @Environment(\.dismiss) private var dismiss
+
+    /// 拖动进度条期间的本地值：手指位置优先于播放时钟，
+    /// 否则 time observer 每秒更新会和拖动抢滑块，来回跳。
+    @State private var isScrubbing = false
+    @State private var scrubProgress: Double = 0
 
     var body: some View {
         ZStack {
@@ -10,6 +14,7 @@ struct NowPlayingView: View {
 
             ScrollView {
                 VStack(spacing: 20) {
+                    header
                     artwork
                     titleBlock
                     progressBlock
@@ -25,25 +30,31 @@ struct NowPlayingView: View {
                     }
                 }
                 .padding(.horizontal, 26)
-                .padding(.top, 56)
+                .padding(.top, 46)
                 .padding(.bottom, 40)
             }
-            .softTopEdge()
         }
-        .overlay(alignment: .topLeading) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 40, height: 40)
-                    .glassEffect(.regular.interactive(), in: Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(.leading, 20)
-            .padding(.top, 6)
+        // 和「选择歌单」同款的弹出样式：大档 sheet + 拖拽指示条，
+        // 往下一滑就能关 —— 不再是钉死在全屏上的整页。
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+    }
+
+    // MARK: - 组件
+
+    /// 头部：标题居中（关闭全靠下滑/拖拽指示条，不设关闭钮）。
+    private var header: some View {
+        VStack(spacing: 4) {
+            Text("正在播放")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(.white)
+            // 副标题不重复歌手名（下面 titleBlock 已经有了），显示队列来源。
+            Text(player.queueSource.name.isEmpty ? "来自播放队列" : "来自「\(player.queueSource.name)」")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+                .lineLimit(1)
         }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - 组件
@@ -82,28 +93,28 @@ struct NowPlayingView: View {
 
     private var progressBlock: some View {
         VStack(spacing: 7) {
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(.white.opacity(0.14))
-                        .frame(height: 5)
-                    Capsule()
-                        .fill(Theme.accent)
-                        .frame(width: max(5, geo.size.width * player.progress), height: 5)
+            // 原生 Slider：iOS 26+ 自动获得液态玻璃滑块（弹性拇指、按压高亮、
+            // 跟手插值），不用自绘。拖动时走本地 scrubProgress，松手才真正 seek ——
+            // 之前自绘进度条只响应「点击落点」，既不能拖、也一步跳到位，所以生硬。
+            Slider(
+                value: Binding(
+                    get: { isScrubbing ? scrubProgress : player.progress },
+                    set: { newValue in
+                        scrubProgress = newValue
+                        isScrubbing = true
+                    }
+                ),
+                in: 0...1
+            ) { editing in
+                if !editing {
+                    player.seek(fraction: scrubProgress)
+                    isScrubbing = false
                 }
-                .frame(maxHeight: .infinity, alignment: .center)
-                .contentShape(.rect)
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onEnded { value in
-                            player.seek(fraction: value.location.x / max(geo.size.width, 1))
-                        }
-                )
             }
-            .frame(height: 22)
+            .tint(Theme.accent)
 
             HStack {
-                Text(Self.timeText(player.currentTime))
+                Text(Self.timeText(isScrubbing ? scrubProgress * player.duration : player.currentTime))
                 Spacer()
                 Text(Self.timeText(player.duration))
             }
@@ -114,15 +125,16 @@ struct NowPlayingView: View {
     }
 
     private var transportControls: some View {
-        HStack(spacing: 34) {
+        HStack(spacing: 24) {
             Button {
                 player.previous()
             } label: {
                 Image(systemName: "backward.fill")
-                    .font(.system(size: 23))
+                    .font(.system(size: 20))
                     .foregroundStyle(.white)
                     .frame(width: 52, height: 52)
-                    .contentShape(.rect)
+                    // 液态玻璃：interactive 才有按压回弹的玻璃手感。
+                    .glassEffect(.regular.interactive(), in: Circle())
             }
             .buttonStyle(.plain)
 
@@ -130,17 +142,22 @@ struct NowPlayingView: View {
                 player.togglePlayPause()
             } label: {
                 ZStack {
-                    Circle()
-                        .fill(Theme.accent)
-                        .frame(width: 68, height: 68)
                     if player.isLoading {
-                        ProgressView().tint(Theme.base)
+                        ProgressView().tint(.white)
                     } else {
                         Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 26, weight: .semibold))
-                            .foregroundStyle(Theme.base)
+                            .font(.system(size: 25, weight: .semibold))
+                            // 主题色图标压在玻璃上 —— 主按钮的层级感。
+                            .foregroundStyle(Theme.accent)
+                            // 符号替换过渡：播放↔暂停不是生硬换图，
+                            // 是 SF Symbols 的 dissolve/位移替换动画。
+                            .contentTransition(.symbolEffect(.replace))
+                            .animation(.spring(duration: 0.32), value: player.isPlaying)
                     }
                 }
+                .frame(width: 68, height: 68)
+                // 主按钮更大，图标用主题色压在玻璃上做层级。
+                .glassEffect(.regular.interactive(), in: Circle())
             }
             .buttonStyle(.plain)
 
@@ -148,10 +165,10 @@ struct NowPlayingView: View {
                 player.next()
             } label: {
                 Image(systemName: "forward.fill")
-                    .font(.system(size: 23))
+                    .font(.system(size: 20))
                     .foregroundStyle(.white)
                     .frame(width: 52, height: 52)
-                    .contentShape(.rect)
+                    .glassEffect(.regular.interactive(), in: Circle())
             }
             .buttonStyle(.plain)
         }
@@ -159,6 +176,15 @@ struct NowPlayingView: View {
 
     private var secondaryControls: some View {
         HStack(spacing: 10) {
+            // 一键单曲循环：不用在轮换按钮上点两趟才能到。
+            // 开着再点一次回到之前的模式（见 toggleRepeatOne）。
+            iconPillButton(
+                icon: "repeat.1",
+                highlighted: player.repeatMode == .one
+            ) {
+                player.toggleRepeatOne()
+            }
+
             pillButton(
                 icon: player.repeatMode.symbol,
                 label: player.repeatMode.label,
@@ -210,6 +236,18 @@ struct NowPlayingView: View {
             .padding(.horizontal, 13)
             .padding(.vertical, 9)
             .glassEffect(.regular, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 纯图标的玻璃圆钮 —— 行宽放不下第四枚带字胶囊时用这个。
+    private func iconPillButton(icon: String, highlighted: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(highlighted ? Theme.accent : .white.opacity(0.65))
+                .padding(10)
+                .glassEffect(.regular, in: Circle())
         }
         .buttonStyle(.plain)
     }
