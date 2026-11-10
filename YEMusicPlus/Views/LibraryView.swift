@@ -14,6 +14,7 @@ struct LibraryView: View {
     @State private var failed: String?
     @State private var showLogin = false
     @State private var showAccount = false
+    @State private var showSettings = false
 
     /// 上次成功取到的 UID。`/nuser/account/get` 偶尔失败时还能靠它把歌单拉回来。
     @AppStorage("library.lastUID") private var lastUID: Int = 0
@@ -57,15 +58,26 @@ struct LibraryView: View {
             .navigationTitle("资料库")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
-                if !isLoggedIn {
-                    ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !isLoggedIn {
                         Button("登录") { showLogin = true }
                             .foregroundStyle(Theme.accent)
                     }
+                    // 设置收在资料库里：缓存、音质、关于都从这儿进。
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .foregroundStyle(.white.opacity(0.85))
+                    }
+                    .accessibilityLabel("设置")
                 }
             }
             .navigationDestination(for: PlaylistRoute.self) { route in
                 PlaylistView(summary: route.summary, owned: route.owned)
+            }
+            .navigationDestination(isPresented: $showSettings) {
+                SettingsView()
             }
             .navigationDestination(isPresented: $showAccount) {
                 AccountDetailView(profile: profile) { signOut() }
@@ -75,7 +87,10 @@ struct LibraryView: View {
         // 有可能让已置位的 isPresented 丢掉，表现就是「点了没反应」。
         .sheet(isPresented: $showLogin) {
             LoginSheet {
-                Task { await refresh(force: true) }
+                Task {
+                    await refresh(force: true)
+                    await AccountStore.shared.refresh()
+                }
             }
         }
         .task {
@@ -84,6 +99,9 @@ struct LibraryView: View {
             // 模拟器没法被脚本点按，留个钩子直接进账号二级页截图。
             if ProcessInfo.processInfo.environment["LIBRARY_ACCOUNT"] == "1" {
                 showAccount = true
+            }
+            if ProcessInfo.processInfo.environment["LIBRARY_SETTINGS"] == "1" {
+                showSettings = true
             }
             #endif
         }
@@ -301,6 +319,7 @@ struct LibraryView: View {
 
     private func signOut() {
         MusicClient.shared.clearAuth()
+        AccountStore.shared.reset()
         profile = nil
         playlists = []
         failed = nil

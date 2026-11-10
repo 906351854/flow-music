@@ -6,23 +6,26 @@ import SwiftUI
 /// 这里不能再自己套一层玻璃，否则会出现「玻璃里还有一块玻璃」的重影，
 /// 而且会破坏下滑时和标签栏一起下沉的动画。
 struct PlayerBar: View {
-    let track: Track
+    /// 当前曲目。为 nil 时播放条依然常驻（空态占位，控制键禁用）——
+    /// 底部形态固定，开始/结束播放时整页布局不会跟着上下跳一格。
+    let track: Track?
     var embedded: Bool = false
     let onTap: () -> Void
 
     @EnvironmentObject private var player: PlayerService
 
+    private var artSide: CGFloat { embedded ? 32 : 36 }
+
     var body: some View {
         HStack(spacing: 10) {
-            ArtworkView(url: track.coverURL, cornerRadius: embedded ? 7 : 9)
-                .frame(width: embedded ? 32 : 36, height: embedded ? 32 : 36)
+            artwork
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(track.name)
+                Text(track?.name ?? "未在播放")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(.white.opacity(track == nil ? 0.72 : 1))
                     .lineLimit(1)
-                Text(track.artistLine)
+                Text(track?.artistLine ?? "点这里挑一首歌")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.secondaryText)
                     .lineLimit(1)
@@ -97,6 +100,9 @@ struct PlayerBar: View {
                 }
                 .buttonStyle(.plain)
             }
+            // 空态下三键只做占位，不接事件：点整条都归外层的 onTap（去搜索）。
+            .opacity(track == nil ? 0.38 : 1)
+            .allowsHitTesting(track != nil)
         }
         // 嵌入标签栏时系统容器只留了很窄的边，自己再补一段，封面才不会贴着屏幕边。
         // 控制区整体再往左挪一点，别贴着胶囊右缘。
@@ -106,6 +112,25 @@ struct PlayerBar: View {
         .modifier(PlayerBarGlass(embedded: embedded))
         .contentShape(.rect)
         .onTapGesture(perform: onTap)
+    }
+
+    /// 封面。没有曲目时给一块占位玻璃砖 —— 高度和真封面一致，
+    /// 常驻的播放条不会因为空态而变矮。
+    @ViewBuilder
+    private var artwork: some View {
+        if let track {
+            ArtworkView(url: track.coverURL, cornerRadius: embedded ? 7 : 9)
+                .frame(width: artSide, height: artSide)
+        } else {
+            RoundedRectangle(cornerRadius: embedded ? 7 : 9, style: .continuous)
+                .fill(.white.opacity(0.10))
+                .overlay {
+                    Image(systemName: "music.note")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+                .frame(width: artSide, height: artSide)
+        }
     }
 }
 

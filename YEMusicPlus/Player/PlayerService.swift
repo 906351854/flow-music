@@ -532,20 +532,53 @@ final class PlayerService: ObservableObject {
         autoSkipTask?.cancel()
         defer { isLoading = false }
 
+        // 缓存命中就用本地文件播放：连取流接口都不打。
+        // 取流是所有请求里最容易被 -460 风控盯上的，缓存命中等于整体绕开。
+        //
+        // 沿降级链从高到低找：上次可能因为没有高音源被降档缓存，
+        // 只认当前档位的话会出现「明明缓存了却当没缓存」。
+        var cachedHit: (level: String, url: URL)?
+        for level in qualityDowngradeChain() {
+            if let url = AudioCacheStore.shared.cachedURL(forKey: "\(track.id)-\(level)") {
+                cachedHit = (level, url)
+                break
+            }
+        }
+        var usedCacheKey: String?
+
         do {
-            let (data, url) = try await fetchPlayableStream(for: track)
+            let data: SongURLData?
+            let url: URL
+            if let cachedHit {
+                data = nil
+                url = cachedHit.url
+                usedCacheKey = "\(track.id)-\(cachedHit.level)"
+            } else {
+                let fetched = try await fetchPlayableStream(for: track)
+                data = fetched.data
+                url = fetched.url
+            }
 
             let item = AVPlayerItem(url: url)
             player.replaceCurrentItem(with: item)
 
             duration = Double(track.durationMS) / 1000
             currentTime = 0
-            streamLevel = data.level
+            // 命中缓存时汇报缓存里的实际档位，而不是用户设置的那档。
+            streamLevel = cachedHit?.level ?? data?.level ?? qualityLevel
             consecutiveFailures = 0
             stallTicks = 0
 
-            if data.isTrialOnly {
+            if let data, data.isTrialOnly {
                 notice = "会员曲目，当前仅提供试听片段"
+            }
+
+            // 试听片段一律不进缓存：缓存下来以后命中就只能永远听 30 秒。
+            // level 是可选值，必须先解包再拼 key —— 直接插值会写出
+            // `Optional("exhigh")` 这种永远命中不了的脏 key。
+            if let data, !data.isTrialOnly {
+                let level = data.level ?? qualityLevel
+                AudioCacheStore.shared.cache(url: url, key: "\(track.id)-\(level)")
             }
 
             if autoPlay {
@@ -560,6 +593,14 @@ final class PlayerService: ObservableObject {
             pushNowPlayingInfo()
             schedulePrefetch()
         } catch {
+            // 本地缓存文件坏了（半截、容器异常）：删掉它改走网络重来一次。
+            // 不这么做的话，这首歌唱到一半断掉、下次还是同一个坏文件。
+            if let usedCacheKey {
+                AudioCacheStore.shared.remove(forKey: usedCacheKey)
+                await loadCurrent(autoPlay: autoPlay, autoSkip: autoSkip)
+                return
+            }
+
             player.replaceCurrentItem(with: nil)
             isPlaying = false
             duration = 0

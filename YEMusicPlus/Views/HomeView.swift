@@ -16,6 +16,9 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var player: PlayerService
 
+    /// 右上角头像被点：由 RootView 打开资料库（设置也收在那里）。
+    var onAvatarTap: () -> Void = {}
+
     /// 当前牌堆的来源。
     @State private var source: HomeSource = .daily
     @State private var tracks: [Track] = []
@@ -41,7 +44,12 @@ struct HomeView: View {
     /// 用来在大歌单里快速巡航。松手即退出。
     @State private var fastScroll = false
 
-    // MARK: 歌词模式（按住封面往左滑）
+    // MARK: 歌词模式（在任意位置横滑）
+
+    /// 横滑一个来回的距离：手指走过这么多，歌词就从 0 到 1。
+    /// 170 → 120 → 90：每收一次，手指需要走的绝对距离就短一截。
+    /// 真正决定「松不松」的是 `finishLyricsDrag` 里的硬门槛，这个只影响跟手速度。
+    private static let lyricsDragDistance: CGFloat = 90
 
     /// 歌词面板是否处于展开状态（松手吸附后的稳定值）。
     @State private var lyricsOpen = false
@@ -50,8 +58,6 @@ struct HomeView: View {
     /// 这一笔拖动定下的轴向。一旦定了横/竖就不再换，
     /// 避免斜着拖时牌堆和歌词面板来回打架。
     @State private var dragAxis: DragAxis?
-    /// 进入横向拖动那一刻的展开进度（0 或 1），位移在此基础上累加。
-    @State private var axisStartProgress: CGFloat = 0
     /// 当前曲目的歌词与加载状态。
     @State private var lyricLines: [LyricLine] = []
     @State private var lyricLoading = false
@@ -78,8 +84,12 @@ struct HomeView: View {
                 ToolbarItem(placement: .principal) {
                     sourceButton
                 }
+                // 右上角让给头像入口；「换一批」挪到左边，两者不再抢位置。
+                ToolbarItem(placement: .topBarLeading) {
+                    leadingStatus
+                }
                 ToolbarItem(placement: .topBarTrailing) {
-                    trailingStatus
+                    AvatarButton(action: onAvatarTap)
                 }
             }
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -133,9 +143,9 @@ struct HomeView: View {
         .accessibilityLabel("选择歌单，当前是\(source.name)")
     }
 
-    /// 换来源时转圈；漫游时给一个「换一批」。
+    /// 换来源时转圈；漫游时给一个「换一批」。放在导航栏左侧。
     @ViewBuilder
-    private var trailingStatus: some View {
+    private var leadingStatus: some View {
         if isLoading {
             ProgressView()
                 .controlSize(.small)
@@ -257,6 +267,12 @@ struct HomeView: View {
                     // 挪开并大幅内倾，两侧的专辑则留在雾底下。
                     centerCard(metrics, progress: progress)
                 }
+                // 滑动手势挂在整块舞台上，而不是只挂在牌堆上 ——
+                // 以前手指必须落在封面上才拖得动，看着像「按住封面才肯走」，
+                // 和封面的点按（播放/暂停）抢同一片区域，轻扫一下常被认成点击。
+                // 现在空白处、雾上、歌词上都认：往左滑开歌词，往右滑收回。
+                .contentShape(Rectangle())
+                .simultaneousGesture(deckDrag(metrics))
             }
             .ignoresSafeArea()
 
@@ -290,7 +306,9 @@ struct HomeView: View {
                         .padding(.top, 10)
                 }
             }
-            .padding(.bottom, 14)
+            // 底部要给常驻的播放条让位：安全区只挡住了胶囊本身，
+            // 信息区还会贴着它。多留这一段，翻页计数才不会被播放条盖住。
+            .padding(.bottom, 64)
             .frame(width: geo.size.width, height: geo.size.height, alignment: .bottom)
         }
         .allowsHitTesting(false)
@@ -333,11 +351,8 @@ struct HomeView: View {
         .frame(width: m.width, height: m.height)
         .mask(deckMask(m))
         .contentShape(Rectangle())
-        // 拖动用并行识别而不是高优先级：高优先级在手指落下的瞬间就接管事件流，
-        // Button 的 pressed 状态永远亮不起来 —— 正中封面「按下去下沉、抬手弹起」
-        // 的反馈就是这么消失的。并行识别下两者同时跑：拖动照常（越过 8pt 阈值
-        // Button 自动让位），单击/长按 Button 照常，按下反馈也回来了。
-        .simultaneousGesture(deckDrag(m))
+        // 拖动手势已经上移到舞台整层（见 stage）：这里只留「长按快速翻牌」，
+        // 否则同一笔滑动会被父子两个 DragGesture 各记一遍。
         .simultaneousGesture(fastScrollGesture)
     }
 
@@ -366,12 +381,10 @@ struct HomeView: View {
         }
         .frame(width: m.width, height: m.height)
         // 收起时完全透明且不接事件，轻点/拖动全部落在牌堆那份上；
-        // 展开后它盖在雾上，轻点播放/暂停、按住左滑都归它。
-        // 手势同样用并行识别（理由见牌堆），且只在展开时才挂 ——
-        // 收起时挂着也会抢底下 Button 的按下反馈。
+        // 展开后它盖在雾上，只负责显示（点按播放已在 card 里对歌词展开态屏蔽）。
+        // 拖动由舞台整层的 deckDrag 统一接管，这里不再重复挂。
         .opacity(Double(lyricsProgress))
         .allowsHitTesting(lyricsProgress > 0.01)
-        .simultaneousGesture(lyricsProgress > 0.01 ? deckDrag(m) : nil)
         .simultaneousGesture(fastScrollGesture)
     }
 
@@ -413,6 +426,10 @@ struct HomeView: View {
         // 只有正中那张可以按 —— 上下露出的封面一律不可点。
         // 之前试过「点旁边翻页」，结果想拖牌堆时手一抖就成了误触，得不偿失。
         return Button {
+            // 歌词展开时封面只当背景板：点它不播放/暂停 —— 面板正展开，
+            // 手在屏幕上大多是冲着歌词去的，误触一下切歌很突兀。
+            // 要播放先右滑把面板收回来。
+            guard !lyricsOpen else { return }
             if isCurrent {
                 player.togglePlayPause()
             } else {
@@ -453,7 +470,8 @@ struct HomeView: View {
         .opacity(fade(d))
         .shadow(color: .black.opacity(shadowAlpha(d)), radius: 18, y: 10)
         // 只有正中那张接收点击，旁边的封面纯展示 —— 想翻页只能拖，杜绝误触。
-        .allowsHitTesting(isCenter)
+        // 歌词展开时连正中那张也不接（连按下态都不亮），整块让给滑动手势。
+        .allowsHitTesting(isCenter && !lyricsOpen)
         .accessibilityLabel(isCenter ? "播放 \(track.name)" : track.name)
     }
 
@@ -663,7 +681,9 @@ struct HomeView: View {
         .frame(width: m.width, height: m.height)
         .opacity(Double(lyricsProgress))
         .allowsHitTesting(lyricsOpen)
-        .gesture(lyricsPanelDrag)
+        // 这一层不再自挂 DragGesture：横滑统一交给舞台那一个识别器。
+        // 父子各挂一个同类型的拖动手势时，两者会互相等对方失败，
+        // 手指走了一截才被认领 —— 手感就是「滑不动、要用力」。
     }
 
     // MARK: - 手势
@@ -686,19 +706,25 @@ struct HomeView: View {
     }
 
     private func deckDrag(_ m: DeckMetrics) -> some Gesture {
-        DragGesture(minimumDistance: 8)
+        DragGesture(minimumDistance: 6)
             .onChanged { value in
                 guard !tracks.isEmpty else { return }
                 let h = value.translation.height
                 let w = value.translation.width
 
-                // 轴向判定：这一笔先动过 8pt 时定死横/竖，此后不再换向 ——
+                // 上一笔被系统打断时不会走 onEnded，dragAxis 会残留成 .vertical，
+                // 接下来怎么横滑都被当翻牌 —— 这里让明显的横向位移把它纠正回来。
+                if dragAxis == .vertical, abs(w) > 24, abs(w) > abs(h) * 1.5 {
+                    dragAxis = .horizontal
+                }
+
+                // 轴向判定：这一笔先动过 6pt 时定死横/竖，此后不再换向 ——
                 // 斜着拖不会出现牌堆和歌词面板来回抢。
+                // 横向门槛压到 6pt：左滑应该是随手一划就开，不用先按住封面。
                 // 歌词展开期间不认竖向：牌堆整个冻结，想翻歌先收回面板。
                 if dragAxis == nil {
-                    if abs(w) > 8, abs(w) > abs(h) * 1.15 {
+                    if abs(w) > 6, abs(w) > abs(h) * 1.15 {
                         dragAxis = .horizontal
-                        axisStartProgress = lyricsOpen ? 1 : 0
                         DeckHaptics.prepare()
                     } else if abs(h) > 10, !lyricsOpen {
                         dragAxis = .vertical
@@ -707,8 +733,21 @@ struct HomeView: View {
 
                 switch dragAxis {
                 case .horizontal:
-                    // 往左滑展开歌词，往右收回。170pt 走完全程。
-                    lyricsProgress = min(max(axisStartProgress - w / 170, 0), 1)
+                    // 往左滑展开歌词，往右收回。`lyricsDragDistance` 走完全程。
+                    //
+                    // 基准直接用当前开合状态，不记「进入这一笔时的进度」：
+                    // lyricsOpen 只在一笔结束时翻转，所以它天然就是本笔的起点，
+                    // 而且上一笔被打断也不会把基准带歪。
+                    //
+                    // 这里必须显式关掉动画：上一次吸附的 spring 还没跑完时按下手指，
+                    // 新值会被那个 spring 平滑掉 —— 手指走了一截、画面只挪了一点点，
+                    // 这就是「怎么滑都到不了位」的来源。拖动期间画面必须逐帧跟手。
+                    let base: CGFloat = lyricsOpen ? 1 : 0
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) {
+                        lyricsProgress = min(max(base - w / Self.lyricsDragDistance, 0), 1)
+                    }
 
                 case .vertical:
                     if tickSlot == nil { DeckHaptics.prepare() }
@@ -749,32 +788,33 @@ struct HomeView: View {
             }
     }
 
-    /// 歌词面板上的拖动：只管横向收回（面板里竖向留给歌词滚动）。
-    private var lyricsPanelDrag: some Gesture {
-        DragGesture(minimumDistance: 10)
-            .onChanged { value in
-                guard dragAxis == nil || dragAxis == .horizontal else { return }
-                if dragAxis == nil {
-                    guard abs(value.translation.width) > abs(value.translation.height) else { return }
-                    dragAxis = .horizontal
-                    axisStartProgress = lyricsOpen ? 1 : 0
-                }
-                lyricsProgress = min(max(axisStartProgress - value.translation.width / 170, 0), 1)
-            }
-            .onEnded { value in
-                guard dragAxis == .horizontal else { return }
-                finishLyricsDrag(value)
-                dragAxis = nil
-            }
-    }
-
-    /// 松手时按进度吸附：过半就算开，另外轻扫速度也认。
+    /// 松手时按「这一笔的方向 + 惯性落点」结算，而不是按手指停在哪。
+    ///
+    /// 之前只认百分比（穿过半程才吸附），关歌词得真滑 60~85pt，
+    /// 手感就是「推不动、要用力甩」。现在两个方向各有硬门槛：
+    /// 右滑超过 28pt 一定关、左滑超过 32pt 一定开，余下的情况看系统预测的惯性落点。
+    /// 距离短、门槛低、还带预测，一划就该到位。
+    ///
+    /// 关比开更松：退回是「我够了」的动作，展开则要稍微明确一点，免得手一抖跳进歌词。
     private func finishLyricsDrag(_ value: DragGesture.Value) {
-        let wantOpen = lyricsProgress > 0.5
-            || (!lyricsOpen && value.velocity.width < -900)
-            || (lyricsOpen && value.velocity.width > 900)
+        let dx = value.translation.width
+        let v = value.velocity.width
+        let base: CGFloat = lyricsOpen ? 1 : 0
+        let projected = base - value.predictedEndTranslation.width / Self.lyricsDragDistance
 
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+        var wantOpen: Bool
+        if lyricsOpen {
+            // 收回：右滑过 24pt、惯性往右、预测落点掉到 0.7 以下 —— 任一条就关。
+            wantOpen = !(dx > 24 || projected < 0.70 || v > 200)
+        } else {
+            // 展开：左滑过 26pt、惯性往左、预测落点过 0.30 —— 任一条就开。
+            wantOpen = dx < -26 || projected > 0.30 || v < -200
+        }
+        // 明显反方向的一笔不改变现状（展开时继续往左滑、收起时继续往右滑）。
+        if lyricsOpen, dx < -22 { wantOpen = true }
+        if !lyricsOpen, dx > 22 { wantOpen = false }
+
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.92)) {
             lyricsProgress = wantOpen ? 1 : 0
         }
         guard wantOpen != lyricsOpen else { return }
@@ -819,7 +859,7 @@ struct HomeView: View {
     private var fastScrollGesture: some Gesture {
         LongPressGesture(minimumDuration: 0.42, maximumDistance: 14)
             .onEnded { _ in
-                guard !fastScroll else { return }
+                guard !fastScroll, !lyricsOpen else { return }
                 fastScroll = true
                 DeckHaptics.tick(intensity: 1.0)
             }
