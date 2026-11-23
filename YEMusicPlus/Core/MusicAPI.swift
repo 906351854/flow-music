@@ -104,22 +104,22 @@ enum MusicAPI {
         // 登录前后推荐结果不一样，用两个缓存槽，登录完自然拿到自己那份。
         let slot = client.isLoggedIn ? "user" : "guest"
         let key = "daily-\(slot)-\(limit)"
-        let cached = ResponseCache.data(for: key, maxAge: 6 * 60 * 60)
 
-        let data: Data
-        if let cached {
-            data = cached
-        } else {
-            data = try await client.eapi(path: config.endpoints.dailyRecommend, payload: [
-                "limit": limit,
-                "offset": 0,
-                "total": true,
-                "n": 1000,
-            ])
-            ResponseCache.store(data, for: key)
+        if let cached = ResponseCache.data(for: key, maxAge: 6 * 60 * 60) {
+            let response = try client.decoded(DailySongsResponse.self, from: cached)
+            return response.data?.dailySongs ?? []
         }
 
+        let data = try await client.eapi(path: config.endpoints.dailyRecommend, payload: [
+            "limit": limit,
+            "offset": 0,
+            "total": true,
+            "n": 1000,
+        ])
         let response = try client.decoded(DailySongsResponse.self, from: data)
+        // 先解码、后写缓存：错误体一旦进缓存，下次启动会被当成数据读出来，
+        // 表现就是「明明网络好了，App 还一直报限流」。
+        ResponseCache.store(data, for: key)
         return response.data?.dailySongs ?? []
     }
 
@@ -136,19 +136,19 @@ enum MusicAPI {
     static func userPlaylists(uid: Int, forceRefresh: Bool = false) async throws -> [PlaylistSummary] {
         let path = config.endpoints.userPlaylist ?? "/user/playlist"
         let key = "user-playlist-\(uid)"
-        let data: Data
+
         if !forceRefresh, let cached = ResponseCache.data(for: key, maxAge: 3 * 60) {
-            data = cached
-        } else {
-            data = try await client.eapi(path: path, payload: [
-                "uid": uid,
-                "limit": 1000,
-                "offset": 0,
-            ])
-            ResponseCache.store(data, for: key)
+            let response = try client.decoded(UserPlaylistsResponse.self, from: cached)
+            return (response.playlist ?? []).map(PlaylistSummary.init(fromPlaylistDTO:))
         }
 
+        let data = try await client.eapi(path: path, payload: [
+            "uid": uid,
+            "limit": 1000,
+            "offset": 0,
+        ])
         let response = try client.decoded(UserPlaylistsResponse.self, from: data)
+        ResponseCache.store(data, for: key)
         return (response.playlist ?? []).map(PlaylistSummary.init(fromPlaylistDTO:))
     }
 }

@@ -39,5 +39,27 @@
   "qr": {
     "type": 3,
     "pollInterval": 2.0
+  },
+  "playback": {
+    "engine": "luoxue",
+    "fallbackToNetease": true,
+    "luoxue": {
+      "sourceKey": "wy",
+      "qualityMap": {
+        "standard": "128k",
+        "higher": "320k",
+        "exhigh": "320k",
+        "lossless": "flac",
+        "hires": "flac24bit"
+      },
+      "scripts": [
+        { "name": "yuningxi", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/yuningxi/latest.js" },
+        { "name": "qingliang", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/qingliang/latest.js" },
+        { "name": "helloworld", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/helloworld/latest.js" },
+        { "name": "jiexiang", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/jiexiang/latest.js" },
+        { "name": "xinglan", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/xinglan/latest.js" },
+        { "name": "feichangdao", "url": "https://raw.githubusercontent.com/pdone/lx-music-source/main/feichangdao/latest.js" }
+      ]
+    }
   }
 }

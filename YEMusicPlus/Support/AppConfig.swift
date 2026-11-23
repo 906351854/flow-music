@@ -52,11 +52,41 @@ struct AppConfig: Decodable {
         let pollInterval: Double
     }
 
+    /// 取流方案。曲库、歌词、封面仍然走官方接口，
+    /// 这里只决定「播放地址从哪儿拿」。
+    struct Playback: Decodable {
+
+        struct Script: Decodable, Identifiable {
+            let name: String
+            let url: String
+            var id: String { name }
+        }
+
+        struct Luoxue: Decodable {
+            /// 用落雪脚本里的哪个源取流，网易云曲目对应 `wy`
+            let sourceKey: String
+            /// 我们的音质档位 → 落雪脚本的音质标识
+            let qualityMap: [String: String]
+            /// 按顺序尝试的在线脚本，第一个能初始化的就被启用
+            let scripts: [Script]
+        }
+
+        /// `netease` = 官方取流接口；`luoxue` = 自定义源脚本
+        let engine: String
+        /// 落雪取不到时是否回退官方接口
+        let fallbackToNetease: Bool
+        let luoxue: Luoxue?
+
+        var usesLuoxue: Bool { engine.lowercased() == "luoxue" }
+    }
+
     let upstream: Upstream
     let client: Client
     let quality: Quality
     let endpoints: Endpoints
     let qr: QR
+    /// 老配置文件里没有这一段时整个 config 仍能解码，回退到官方取流。
+    let playback: Playback?
 
     static let shared: AppConfig = load()
 
@@ -95,6 +125,7 @@ struct AppConfig: Decodable {
                              account: "/nuser/account/get",
                              dailyRecommend: "/v3/discovery/recommend/songs",
                              userPlaylist: "/user/playlist"),
-        qr: QR(type: 3, pollInterval: 2.0)
+        qr: QR(type: 3, pollInterval: 2.0),
+        playback: nil
     )
 }

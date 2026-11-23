@@ -67,6 +67,8 @@ struct RootView: View {
                     .background(.ultraThinMaterial, in: Capsule())
                     .overlay(Capsule().strokeBorder(.white.opacity(0.1)))
                     .padding(.horizontal, 40)
+                    // 下移到标题栏下方：原来贴着安全区顶部，会和右上角头像叠在一起。
+                    .padding(.top, 52)
                     .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }

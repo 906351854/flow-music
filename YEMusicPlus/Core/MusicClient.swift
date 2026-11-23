@@ -4,6 +4,10 @@ import os.log
 enum MusicAPIError: LocalizedError {
     case http(Int)
     case business(code: Int, message: String?)
+    /// 服务端风控（-460）：不是「这首歌不能放」，而是「你这段时间请求太多」。
+    /// 单独成一个 case，是因为它的处置方式和业务错误完全不同 ——
+    /// 不能重试、不能降档、不能弹窗，只能等冷却。
+    case rateLimited(retryAfter: TimeInterval)
     case needLogin
     case decoding(String)
     case transport(String)
@@ -20,6 +24,8 @@ enum MusicAPIError: LocalizedError {
             case 301: return "需要登录"
             default: return "接口错误（\(code)）"
             }
+        case .rateLimited(let retryAfter):
+            return "服务端限流，约 \(max(1, Int(retryAfter.rounded(.up)))) 秒后自动重试"
         case .needLogin:
             return "请先在「资料库」里扫码登录"
         case .decoding(let detail):
@@ -92,8 +98,10 @@ final class MusicClient {
 
     // MARK: - 设备标识
 
-    /// 被 -460 风控后换一个设备标识再试。
-    /// 风控按 deviceId 累积，换标识比反复重试同一个 ID 有效得多。
+    /// 被 -460 风控后换一个设备标识。
+    /// 风控按 deviceId 累积，换标识比反复重试同一个 ID 有效 ——
+    /// 但**不能每次都换**：同一登录态下不断跳设备本身就是异常特征，
+    /// 所以只由 `noteRateLimit` 在冷却第二次命中时调用，频率另有上限。
     func rotateDeviceID() {
         let hex = Array("0123456789ABCDEF")
         let generated = String((0..<52).map { _ in hex.randomElement()! })
@@ -104,6 +112,67 @@ final class MusicClient {
             try? Data(generated.utf8).write(to: url, options: .atomic)
         }
         Self.log.notice("deviceId 已轮换（风控恢复）")
+    }
+
+    // MARK: - 风控冷却
+
+    /// 冷却截止时间。命中 -460 之后的一段时间里，所有请求直接短路 ——
+    /// 风控是按请求量累积的，继续打只会把计数顶得更高，
+    /// 用户等再久也不会恢复（这是「稍等片刻再试」永远无效的原因）。
+    private var blockedUntil: Date?
+    private var rateLimitHits = 0
+    private var lastRateLimitAt: Date?
+    private var lastDeviceRotateAt: Date?
+    /// 本次冷却是否属于「网络环境风险」。
+    /// 这类是 IP 级封禁：同一个网络里换 deviceId、重试多少次都没用，
+    /// 只能换网络或等它自己过去。
+    private var networkRiskBlock = false
+
+    /// 距冷却结束还有多少秒；0 表示当前没被限流。
+    var rateLimitCooldown: TimeInterval {
+        lock.lock(); defer { lock.unlock() }
+        guard let blockedUntil else { return 0 }
+        return max(0, blockedUntil.timeIntervalSinceNow)
+    }
+
+    /// 当前这次限制是不是网络环境级别的（决定要不要自动重试）。
+    var rateLimitIsNetworkRisk: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return networkRiskBlock
+    }
+
+    /// 记一次 -460：冷却按 15 / 30 / 45 / 60 秒递增，5 分钟没再犯就清零。
+    /// 网络环境风险的封禁时长明显更长，按 2 分钟起步、最长 10 分钟退避。
+    private func noteRateLimit(message: String?) {
+        let now = Date()
+        let isNetworkRisk = message?.contains("网络环境") == true
+        lock.lock()
+        if let lastRateLimitAt, now.timeIntervalSince(lastRateLimitAt) > 300 {
+            rateLimitHits = 0
+        }
+        rateLimitHits += 1
+        let backoff: TimeInterval = isNetworkRisk
+            ? min(120 * Double(rateLimitHits), 600)
+            : min(15 * Double(rateLimitHits), 60)
+        blockedUntil = now.addingTimeInterval(backoff)
+        lastRateLimitAt = now
+        networkRiskBlock = isNetworkRisk
+        // 只有「操作频繁」这类才值得换设备号；网络环境风险换标识毫无意义，
+        // 反而把「同一账号频繁跳设备」这个特征喂给风控。
+        let shouldRotate = !isNetworkRisk && rateLimitHits >= 2
+            && (lastDeviceRotateAt.map { now.timeIntervalSince($0) > 180 } ?? true)
+        if shouldRotate { lastDeviceRotateAt = now }
+        lock.unlock()
+
+        Self.log.notice("触发风控 -460，冷却 \(Int(backoff))s（第 \(self.rateLimitHits) 次，网络风险=\(isNetworkRisk)）")
+        if shouldRotate { rotateDeviceID() }
+    }
+
+    /// 冷却期内一个请求都不发。抛出携带剩余秒数的错误，
+    /// 上层据此安排「冷却结束再自动接上」。
+    private func checkRateLimit() throws {
+        let wait = rateLimitCooldown
+        if wait > 0 { throw MusicAPIError.rateLimited(retryAfter: wait) }
     }
 
     // MARK: - Cookies
@@ -174,6 +243,10 @@ final class MusicClient {
 
     /// POST 到 `https://<interfaceHost>/eapi<path>`，body 为加密后的 `params`。
     func eapi(path: String, payload: [String: Any] = [:]) async throws -> Data {
+        // 冷却期内直接失败，不碰网络。风控计数是按请求量走的，
+        // 多发一个请求就等于把恢复时间往后推一格。
+        try checkRateLimit()
+
         let apiPath = "/api" + path
         guard let url = URL(string: "https://\(config.upstream.interfaceHost)/eapi\(path)") else {
             throw MusicAPIError.transport("接口地址非法")
@@ -237,8 +310,17 @@ final class MusicClient {
                                allowing allowedCodes: Set<Int> = []) throws -> T {
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let code = obj["code"] as? Int, code != 200, !allowedCodes.contains(code) {
-            if code == 301 { throw MusicAPIError.needLogin }
             let message = (obj["message"] as? String) ?? (obj["msg"] as? String)
+            // 风控排查用：把服务端原话打出来，-460 的原因（频率 / 环境 / 账号）
+            // 全在这句话里，只看错误码分不清。
+            Self.log.notice("业务错误 \(code)：\(message ?? "-", privacy: .public)")
+            if code == 301 { throw MusicAPIError.needLogin }
+            // -460 是风控，不是业务错误：登记冷却并抛专用错误，
+            // 让上层停止重试/降档，等窗口过去再取。
+            if code == -460 {
+                noteRateLimit(message: message)
+                throw MusicAPIError.rateLimited(retryAfter: rateLimitCooldown)
+            }
             throw MusicAPIError.business(code: code, message: message)
         }
         do {
@@ -252,9 +334,13 @@ final class MusicClient {
     /// eapi 的 `header`：把自己描述成桌面客户端的一台具体设备。
     private func makeHeader() -> [String: Any] {
         let now = Date().timeIntervalSince1970
+        // deviceID 可能被风控恢复流程改写，读的时候也要过锁。
+        lock.lock()
+        let currentDeviceID = deviceID
+        lock.unlock()
         var header: [String: Any] = [
             "osver": config.client.osVersion,
-            "deviceId": deviceID,
+            "deviceId": currentDeviceID,
             "os": "pc",
             "appver": config.client.appVersion,
             "versioncode": config.client.versionCode,

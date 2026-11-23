@@ -237,6 +237,8 @@ final class PlayerService: ObservableObject {
                 player.play()
             } else if stallTicks >= 25 { // ≈10s 还不行，多半是连接断了
                 stallTicks = 0
+                // 冷却期重新取流只会加深风控；等冷却结束的自动续播即可。
+                guard MusicClient.shared.rateLimitCooldown == 0 else { return }
                 if let track = current {
                     streamCache.removeValue(forKey: "\(track.id)-\(qualityLevel)")
                     Task { await loadCurrent(autoPlay: true, autoSkip: true) }
@@ -286,6 +288,8 @@ final class PlayerService: ObservableObject {
     /// 在同一个队列里点另一首不该把「这是哪个歌单」这个身份弄丢，
     /// 否则每换一首歌，封面流都会以为自己被切走了。
     func play(track: Track, in tracks: [Track]? = nil, source: QueueSource? = nil) {
+        // 用户主动点歌：作废上一轮「等冷却再播」的计划，交给这次重新判断。
+        rateLimitRetryTask?.cancel()
         if let tracks, !tracks.isEmpty {
             let sameQueue = tracks.count == queue.count
                 && zip(tracks, queue).allSatisfy { $0.id == $1.id }
@@ -316,6 +320,7 @@ final class PlayerService: ObservableObject {
             return
         }
         if player.currentItem == nil {
+            rateLimitRetryTask?.cancel()
             Task { await loadCurrent(autoPlay: true, autoSkip: false) }
         } else {
             try? AVAudioSession.sharedInstance().setActive(true)
@@ -377,6 +382,7 @@ final class PlayerService: ObservableObject {
 
     private func advance(forward: Bool) {
         guard !queue.isEmpty else { return }
+        rateLimitRetryTask?.cancel()
 
         if isShuffled && queue.count > 1 {
             var candidate = index
@@ -410,23 +416,42 @@ final class PlayerService: ObservableObject {
     /// 下一首取流地址的预取任务。
     private var prefetchTask: Task<Void, Never>?
 
-    /// 取播放地址。碰到 -460 风控时换一个 deviceId 再试一次 ——
-    /// 实测风控是按设备标识累积的，换标识立刻就能恢复，比让用户等有用。
+    /// 限流冷却结束后的自动续播任务，以及本轮已经重试了几次。
+    /// 重试次数封顶，避免在长时间风控里无限循环。
+    private var rateLimitRetryTask: Task<Void, Never>?
+    private var rateLimitRetries = 0
+    /// 载入代次：连续点歌时用来丢弃过期结果。
+    private var loadGeneration = 0
+
+    /// 同一首歌同一档位的并发请求合并表。
+    /// 预取和用户点歌撞在一起时会各打一次 `song/url`，
+    /// 重复请求正是把 deviceId 推进 -460 风控的主要原因之一。
+    private var inflightStream: [String: Task<SongURLData?, Error>] = [:]
+
+    /// 取播放地址。
+    ///
+    /// 这里**不再**在 -460 时换 deviceId 就地重试：一次播放最多因此变成两个请求，
+    /// 而降级链又会把每一档都走一遍，最坏 5 档 × 2 = 10 个请求在一秒内打出去 ——
+    /// 风控只会越修越死。设备标识的轮换交给 `MusicClient.noteRateLimit()`，
+    /// 它在冷却第二次命中时做一次，且有频率上限。
     private func fetchStreamURL(for track: Track, level: String) async throws -> SongURLData? {
         let key = "\(track.id)-\(level)"
         if let hit = streamCache[key], Date().timeIntervalSince(hit.at) < Self.streamTTL {
             return hit.data
         }
-
-        let data: SongURLData?
-        do {
-            data = try await MusicAPI.songURL(id: track.id, level: level)
-        } catch MusicAPIError.business(let code, _) where code == -460 {
-            MusicClient.shared.rotateDeviceID()
-            try? await Task.sleep(for: .milliseconds(500))
-            data = try await MusicAPI.songURL(id: track.id, level: level)
+        // 已经有同样的请求在飞，就等它的结果，不再发一次。
+        if let running = inflightStream[key] {
+            return try await running.value
         }
 
+        let task = Task<SongURLData?, Error> {
+            // 具体走官方接口还是落雪音源，由 config 的 playback 段决定。
+            try await PlaybackSourceResolver.shared.streamURL(for: track, level: level)
+        }
+        inflightStream[key] = task
+        defer { inflightStream[key] = nil }
+
+        let data = try await task.value
         if let data, data.url?.isEmpty == false {
             streamCache[key] = (data, Date())
         }
@@ -445,23 +470,36 @@ final class PlayerService: ObservableObject {
     /// 自动往下降档重试，而不是直接把错误甩给用户。
     /// 大多数「播放错误」都是这个原因 —— 歌在，只是你要的那档音质没有。
     private func fetchPlayableStream(for track: Track) async throws -> (data: SongURLData, url: URL) {
-        var lastBusinessCode = -110
+        // 只有「接口成功但没有可用地址」才降一档。
+        // 任何错误（限流、传输失败）都直接抛出去 —— 换档重试只会制造请求风暴。
+        //
+        // -110 是「这首曲子对当前账号不可播」：无版权，或者需要会员/单曲购买。
+        // 它跟音质无关，换档不会有任何变化。以前这里会继续往下试，
+        // 一首 VIP 歌就要打 3～5 个请求 —— 每日推荐整列都是 VIP 曲目时，
+        // 点几首就够把账号推到服务端限流阈值上，随后所有歌都报风控。
+        // 落雪音源里 `exhigh` 和 `higher` 映射到同一个 320k，
+        // 不去重的话一次失败会朝同一个接口连发两次 —— 音源脚本自己带限流
+        // （「2 秒内最多 4 次」那种），白白吃掉额度。
+        var triedQualities = Set<String>()
 
         for level in qualityDowngradeChain() {
-            do {
-                if let data = try await fetchStreamURL(for: track, level: level),
-                   let url = MusicAPI.playableURL(from: data.url) {
-                    if level != qualityLevel {
-                        notice = "「\(track.name)」没有\(qualityLabel)音源，已降到「\(levelName(level))」"
-                    }
-                    return (data, url)
+            if PlaybackSourceResolver.shared.isUsingLuoxue {
+                let mapped = PlaybackSourceResolver.shared.mappedQuality(for: level)
+                if triedQualities.contains(mapped) { continue }
+                triedQualities.insert(mapped)
+            }
+            guard let data = try await fetchStreamURL(for: track, level: level) else { continue }
+            if let url = MusicAPI.playableURL(from: data.url) {
+                if level != qualityLevel {
+                    notice = "「\(track.name)」没有\(qualityLabel)音源，已降到「\(levelName(level))」"
                 }
-            } catch MusicAPIError.business(let code, _) where code == -460 {
-                lastBusinessCode = code
-                continue // fetchStreamURL 内部已换过设备号重试过一次，仍不行就试下一档
+                return (data, url)
+            }
+            if data.code == -110 {
+                throw MusicAPIError.business(code: -110, message: nil)
             }
         }
-        throw MusicAPIError.business(code: lastBusinessCode, message: nil)
+        throw MusicAPIError.business(code: -110, message: nil)
     }
 
     private func levelName(_ id: String) -> String {
@@ -482,9 +520,19 @@ final class PlayerService: ObservableObject {
             next = nil
         }
         guard let next, next.id != current?.id else { return }
+        // 冷却期不预取：这不是「必须马上要」的请求，白送一个风控计数没有意义。
+        guard MusicClient.shared.rateLimitCooldown == 0 else { return }
+        // 落雪音源不预取：取一条直链只要几百毫秒，而音源脚本自己带限流
+        // （有的明写「2 秒内最多 4 次」）。预取等于把额度提前花掉，
+        // 用户快速切歌时反而更容易被拒。
+        guard !PlaybackSourceResolver.shared.isUsingLuoxue else { return }
         let level = qualityLevel
         prefetchTask = Task { [weak self] in
-            _ = try? await self?.fetchStreamURL(for: next, level: level)
+            // 快速连续切歌时只预取最后停下的那首 —— 前面几次直接取消掉，
+            // 否则每划一下就打一次 song/url，同样是喂给风控的。
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled, let self else { return }
+            _ = try? await self.fetchStreamURL(for: next, level: level)
         }
     }
 
@@ -506,6 +554,9 @@ final class PlayerService: ObservableObject {
 
     /// 把接口错误翻译成用户能看懂的话。弹 Alert 之前先过这一道。
     private func friendlyMessage(_ error: Error, track: Track) -> String {
+        if case MusicAPIError.rateLimited(let retryAfter) = error {
+            return "服务端限流，约 \(max(1, Int(retryAfter.rounded(.up)))) 秒后自动重试。"
+        }
         if case MusicAPIError.business(let code, let message) = error {
             switch code {
             case -110:
@@ -526,11 +577,15 @@ final class PlayerService: ObservableObject {
     /// 用户主动点歌的失败仍然弹窗说清楚。
     private func loadCurrent(autoPlay: Bool, autoSkip: Bool) async {
         guard let track = current else { return }
+        loadGeneration &+= 1
+        let generation = loadGeneration
         isLoading = true
         errorMessage = nil
         notice = nil
         autoSkipTask?.cancel()
-        defer { isLoading = false }
+        // 只有「最新一代」才负责收尾，否则先发的请求返回时会把
+        // 后一次载入的 loading 状态提前关掉。
+        defer { if generation == loadGeneration { isLoading = false } }
 
         // 缓存命中就用本地文件播放：连取流接口都不打。
         // 取流是所有请求里最容易被 -460 风控盯上的，缓存命中等于整体绕开。
@@ -559,6 +614,10 @@ final class PlayerService: ObservableObject {
                 url = fetched.url
             }
 
+            // 用户在这期间点了别的歌：这次的结果已经过期，直接丢弃。
+            // 不丢的话，先发的请求后到，会把新歌替换成旧歌。
+            guard generation == loadGeneration, current?.id == track.id else { return }
+
             let item = AVPlayerItem(url: url)
             player.replaceCurrentItem(with: item)
 
@@ -567,6 +626,7 @@ final class PlayerService: ObservableObject {
             // 命中缓存时汇报缓存里的实际档位，而不是用户设置的那档。
             streamLevel = cachedHit?.level ?? data?.level ?? qualityLevel
             consecutiveFailures = 0
+            rateLimitRetries = 0
             stallTicks = 0
 
             if let data, data.isTrialOnly {
@@ -592,7 +652,28 @@ final class PlayerService: ObservableObject {
             loadArtwork(for: track)
             pushNowPlayingInfo()
             schedulePrefetch()
+        } catch MusicAPIError.rateLimited(let retryAfter) {
+            guard generation == loadGeneration else { return }
+            // 限流不弹窗：它是暂时的，弹窗只会让人反复点「好」再试，
+            // 每试一次就等于再往风控计数里添一笔，永远恢复不了。
+            // 这里只挂一条轻提示，冷却结束自动接上。
+            player.replaceCurrentItem(with: nil)
+            isPlaying = false
+            duration = 0
+            currentTime = 0
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+
+            if MusicClient.shared.rateLimitIsNetworkRisk {
+                // IP 级风控：同一个网络里重试多少次结果都一样，
+                // 不自动重试、不换 deviceId，直接说清楚该怎么做。
+                notice = "当前网络被网易云判定为风险环境，换 Wi-Fi / 蜂窝后再试"
+            } else {
+                let wait = max(1, Int(retryAfter.rounded(.up)))
+                notice = "服务端限流，约 \(wait) 秒后自动接上"
+                scheduleRateLimitRetry(after: TimeInterval(wait), track: track, autoPlay: autoPlay)
+            }
         } catch {
+            guard generation == loadGeneration else { return }
             // 本地缓存文件坏了（半截、容器异常）：删掉它改走网络重来一次。
             // 不这么做的话，这首歌唱到一半断掉、下次还是同一个坏文件。
             if let usedCacheKey {
@@ -622,6 +703,27 @@ final class PlayerService: ObservableObject {
                 errorMessage = message
                 notifyStopInBackground(reason: message)
             }
+        }
+    }
+
+    /// 冷却结束自动接上当前这首。
+    ///
+    /// 只认「还是这首歌」且当前没有装好的播放项 —— 期间用户切了歌就作废。
+    /// 连续失败封顶 4 次：如果是账号级的长时限流，无限重试只会一直撞墙，
+    /// 到那时才给一次明确的弹窗，比每隔十几秒偷偷重试有用。
+    private func scheduleRateLimitRetry(after delay: TimeInterval, track: Track, autoPlay: Bool) {
+        rateLimitRetryTask?.cancel()
+        guard rateLimitRetries < 4 else {
+            rateLimitRetries = 0
+            errorMessage = "服务端持续限流，请过几分钟再试。"
+            return
+        }
+        rateLimitRetries += 1
+        rateLimitRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay + 0.5))
+            guard !Task.isCancelled, let self else { return }
+            guard self.current?.id == track.id, self.player.currentItem == nil else { return }
+            await self.loadCurrent(autoPlay: autoPlay, autoSkip: false)
         }
     }
 

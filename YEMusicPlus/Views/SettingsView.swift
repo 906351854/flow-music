@@ -14,6 +14,10 @@ struct SettingsView: View {
 
     @State private var confirmClear = false
 
+    @State private var sourceStatus = ""
+    @State private var sourceError: String?
+    @State private var reloadingSource = false
+
     private let capOptions = [256, 512, 1024, 2048]
 
     var body: some View {
@@ -24,6 +28,7 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     cacheCard
                     playbackCard
+                    sourceCard
                     aboutCard
                 }
                 .padding(.horizontal, 16)
@@ -172,6 +177,70 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    // MARK: - 音源
+
+    private var sourceCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader(title: "音源", subtitle: "播放地址从哪儿取")
+
+            infoRow("取流方案", PlaybackSourceResolver.shared.engineName)
+            infoRow("当前脚本", sourceStatus.isEmpty ? "未加载" : sourceStatus)
+
+            if let sourceError {
+                Text(sourceError)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.orange.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button {
+                guard !reloadingSource else { return }
+                reloadingSource = true
+                Task {
+                    do {
+                        _ = try await LuoxueMusicSource.shared.reload()
+                        sourceStatus = LuoxueMusicSource.shared.activeDescription
+                        sourceError = nil
+                    } catch {
+                        sourceError = error.localizedDescription
+                    }
+                    reloadingSource = false
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    if reloadingSource {
+                        ProgressView().controlSize(.mini).tint(Theme.accent)
+                    }
+                    Text(reloadingSource ? "正在加载…" : "重新加载音源")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .foregroundStyle(Theme.accent)
+                .padding(.vertical, 5)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .disabled(reloadingSource)
+
+            Text("音源是猫鼠游戏，单条接口随时会失效。脚本按配置里的顺序挨个尝试，第一个能初始化的就生效；换源只要往脚本目录里丢一个 .js。")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.tertiaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .task {
+            guard PlaybackSourceResolver.shared.isUsingLuoxue else { return }
+            do {
+                _ = try await LuoxueMusicSource.shared.ensureLoaded()
+                sourceStatus = LuoxueMusicSource.shared.activeDescription
+                sourceError = nil
+            } catch {
+                sourceError = error.localizedDescription
+            }
+        }
     }
 
     // MARK: - 关于

@@ -40,6 +40,13 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<!-- 社区音源脚本里有相当一部分写死了 http 明文接口，
+	     不放开 ATS 会被系统静默拦掉（表现为「点了没反应」）。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>UIUserInterfaceStyle</key>
 	<string>Dark</string>
 	<key>UIStatusBarStyle</key>

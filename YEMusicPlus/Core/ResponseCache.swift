@@ -23,6 +23,15 @@ enum ResponseCache {
               let data = try? Data(contentsOf: url),
               !data.isEmpty
         else { return nil }
+
+        // 只认成功响应。之前是拿到 data 就存，-460 的错误体也会被缓存下来，
+        // 之后每次启动都从缓存里读出这个错误 —— 服务端早就恢复了，
+        // App 却一直显示「被限流」。坏缓存读到就删，让上层走网络重取。
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let code = obj["code"] as? Int, code != 200 {
+            try? FileManager.default.removeItem(at: url)
+            return nil
+        }
         return data
     }
 
